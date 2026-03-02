@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode_15.2.app || true
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+        env:
+          IST_SKIP_INTEGRATION_TESTS: "1"
+
+      - name: Build Release
+        run: swift build -c release
+
+  release:
+    needs: build-and-test
+    runs-on: macos-14
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Release
+        run: swift build -c release
+
+      - name: Sign
+        run: make sign
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            .build/release/isolated
+            .build/release/isolated-mcp
+            .build/release/isolated-http
