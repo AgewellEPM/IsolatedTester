@@ -135,7 +135,7 @@ final class Router: @unchecked Sendable {
 
         let formatter = ISO8601DateFormatter()
         let response = HealthResponse(
-            version: "1.0.0",
+            version: IsolatedTesterVersion.current,
             status: status,
             uptime: uptime,
             activeSessions: activeSessions,

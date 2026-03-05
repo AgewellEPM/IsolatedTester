@@ -1,5 +1,6 @@
 import Foundation
 import IsolatedServerCore
+import IsolatedTesterKit
 
 /// JSON-RPC 2.0 transport over stdin/stdout for the MCP protocol.
 final class MCPTransport {
@@ -86,7 +87,7 @@ final class MCPTransport {
             ],
             "serverInfo": [
                 "name": "isolated-tester",
-                "version": "1.0.0"
+                "version": IsolatedTesterVersion.current
             ]
         ]
     }

@@ -1,4 +1,5 @@
 import Foundation
+import IsolatedTesterKit
 
 /// Manages zero-config discovery so editors can find IsolatedTester.
 /// Writes a JSON file to ~/.isolated-tester/server.json on startup.
@@ -13,7 +14,7 @@ public struct DiscoveryService {
         public let pid: Int32
         public let startedAt: Date
 
-        public init(version: String = "1.0.0", httpPort: Int? = nil, mcpBinaryPath: String? = nil) {
+        public init(version: String = IsolatedTesterVersion.current, httpPort: Int? = nil, mcpBinaryPath: String? = nil) {
             self.version = version
             self.httpPort = httpPort
             self.mcpBinaryPath = mcpBinaryPath

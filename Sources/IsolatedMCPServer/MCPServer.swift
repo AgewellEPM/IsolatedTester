@@ -1,5 +1,6 @@
 import Foundation
 import IsolatedServerCore
+import IsolatedTesterKit
 
 @main
 struct IsolatedMCPServer {
@@ -8,7 +9,7 @@ struct IsolatedMCPServer {
         // The discovery file is removed on exit via the defer block below.
         let binaryPath = CommandLine.arguments.first
         let info = DiscoveryService.ServerInfo(
-            version: "1.0.0",
+            version: IsolatedTesterVersion.current,
             httpPort: nil,
             mcpBinaryPath: binaryPath
         )

@@ -7,6 +7,41 @@
 
 AI-powered isolated app testing for macOS. Launch any `.app` on a virtual display, control it with vision-based AI, and verify behavior — without taking over your screen.
 
+## Quick Install (Claude Code Plugin)
+
+```bash
+git clone https://github.com/AgewellEPM/IsolatedTester.git && cd IsolatedTester && ./install.sh
+```
+
+This builds from source, installs binaries to `~/.local/bin/`, and configures the MCP server in Claude Code automatically. Then grant **Screen Recording** and **Accessibility** permissions in System Settings.
+
+### Update
+
+```bash
+cd IsolatedTester && git pull && ./install.sh
+```
+
+### Uninstall
+
+```bash
+cd IsolatedTester && ./uninstall.sh
+```
+
+### Slash Commands
+
+Once installed, these slash commands are available in Claude Code:
+
+| Command | Description |
+|---------|-------------|
+| `/test-app <path> <objective>` | Launch and test a macOS app in an isolated virtual display |
+| `/test-screenshot [session-id]` | Capture a screenshot from a running session |
+| `/test-elements [session-id]` | Inspect accessibility elements of a running session |
+| `/test-cleanup` | Stop all active test sessions |
+
+### Verify Setup
+
+Ask Claude Code to call the `setup_status` tool — it reports version, permissions, virtual display availability, and active sessions.
+
 ## What It Does
 
 IsolatedTester creates invisible virtual displays using private CoreGraphics APIs, launches your app there, and lets an AI agent (Claude, GPT-4, or Claude Code CLI) drive the UI through a screenshot → reason → act loop. Your physical screen is never touched.
@@ -29,15 +64,14 @@ IsolatedTester creates invisible virtual displays using private CoreGraphics API
 └──────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Advanced Installation
 
-### Install from Source
+### Build from Source (Manual)
 
 ```bash
 git clone https://github.com/AgewellEPM/IsolatedTester.git
 cd IsolatedTester
 swift build -c release
-# Install binaries
 cp .build/release/isolated .build/release/isolated-mcp .build/release/isolated-http ~/.local/bin/
 ```
 

@@ -87,6 +87,7 @@ final class MCPToolHandlers {
                 param("y", "number", "Y coordinate of the element", required: true),
                 param("action", "string", "AX action name (default: AXPress)"),
             ]),
+            tool("setup_status", "Check IsolatedTester setup status: version, platform, permissions, virtual display, active sessions", []),
         ]
     }
 
@@ -230,6 +231,31 @@ final class MCPToolHandlers {
                     action: args["action"] as? String ?? "AXPress"
                 )
                 result = "{\"success\": \(success)}"
+
+            case "setup_status":
+                let perms = await sessionManager.checkPermissions()
+                let activeSessions = await sessionManager.activeSessionCount
+                let virtualDisplayAvailable = NSClassFromString("CGVirtualDisplayDescriptor") != nil
+                let status: [String: Any] = [
+                    "version": IsolatedTesterVersion.current,
+                    "platform": "macOS",
+                    "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+                    "permissions": [
+                        "screenRecording": perms.screenRecording,
+                        "accessibility": perms.accessibility,
+                        "allGranted": perms.allGranted
+                    ],
+                    "virtualDisplayAvailable": virtualDisplayAvailable,
+                    "activeSessions": activeSessions,
+                    "toolCount": 19,
+                    "status": perms.allGranted ? "ready" : "permissions_required"
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
+                   let json = String(data: data, encoding: .utf8) {
+                    result = json
+                } else {
+                    result = "{}"
+                }
 
             default:
                 // Unknown tool is an error
