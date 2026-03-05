@@ -1,0 +1,576 @@
+openapi: 3.0.3
+info:
+  title: IsolatedTester HTTP API
+  description: AI-powered isolated app testing for macOS
+  version: 1.0.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://127.0.0.1:7100
+    description: Local development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: Server health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /displays:
+    get:
+      summary: List available displays
+      responses:
+        '200':
+          description: Array of display information
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DisplayInfoResponse'
+
+  /permissions:
+    get:
+      summary: Check macOS permissions
+      responses:
+        '200':
+          description: Permission status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionsResponse'
+
+  /sessions:
+    post:
+      summary: Create a test session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+            example:
+              appPath: /Applications/Calculator.app
+              displayWidth: 1920
+              displayHeight: 1080
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: Invalid request (validation error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      summary: List active sessions
+      responses:
+        '200':
+          description: Array of active sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionInfoResponse'
+
+  /sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^[0-9a-f]{8}$'
+        example: a1b2c3d4
+
+    get:
+      summary: Get session details
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionInfoResponse'
+        '404':
+          description: Session not found
+
+    delete:
+      summary: Stop and remove a session
+      responses:
+        '200':
+          description: Session stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        '404':
+          description: Session not found
+
+  /sessions/{sessionId}/screenshot:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Take a screenshot
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format:
+                  type: string
+                  enum: [png, jpeg]
+                  default: png
+      responses:
+        '200':
+          description: Screenshot captured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScreenshotResponse'
+
+  /sessions/{sessionId}/action:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Perform a UI action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+            examples:
+              click:
+                summary: Click at coordinates
+                value:
+                  action: click
+                  x: 100
+                  y: 200
+              type:
+                summary: Type text
+                value:
+                  action: type
+                  text: Hello World
+              keyPress:
+                summary: Press a key with modifiers
+                value:
+                  action: keyPress
+                  key: c
+                  modifiers: [command]
+              drag:
+                summary: Drag from one point to another
+                value:
+                  action: drag
+                  fromX: 100
+                  fromY: 200
+                  toX: 300
+                  toY: 400
+      responses:
+        '200':
+          description: Action performed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        '400':
+          description: Invalid action or parameters
+
+  /sessions/{sessionId}/test:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Run an AI-driven test
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunTestRequest'
+            example:
+              objective: Calculate 5 + 3 and verify the result is 8
+              provider: anthropic
+              maxSteps: 25
+      responses:
+        '200':
+          description: Test completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestResultResponse'
+        '401':
+          description: API key required
+
+  /sessions/{sessionId}/report:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    get:
+      summary: Get test report
+      responses:
+        '200':
+          description: Test report
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: No report found
+
+  /sessions/{sessionId}/log:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    get:
+      summary: Get action log
+      responses:
+        '200':
+          description: Array of action records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '404':
+          description: Session not found
+
+  /sessions/{sessionId}/cancel:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Cancel a running test
+      responses:
+        '200':
+          description: Test cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  cancelled:
+                    type: boolean
+        '404':
+          description: Session not found
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /audit:
+    get:
+      summary: Recent audit log entries
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditEntry'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Set IST_TOKEN env var to enable authentication
+
+  responses:
+    Unauthorized:
+      description: Invalid or missing authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    CreateSessionRequest:
+      type: object
+      required: [appPath]
+      properties:
+        appPath:
+          type: string
+          description: Path to the .app bundle
+          maxLength: 1024
+          example: /Applications/Calculator.app
+        displayWidth:
+          type: integer
+          minimum: 320
+          maximum: 7680
+          default: 1920
+        displayHeight:
+          type: integer
+          minimum: 320
+          maximum: 7680
+          default: 1080
+        fallbackToMainDisplay:
+          type: boolean
+          default: true
+
+    RunTestRequest:
+      type: object
+      required: [objective]
+      properties:
+        objective:
+          type: string
+          maxLength: 10000
+        successCriteria:
+          type: array
+          items:
+            type: string
+          maxItems: 50
+        failureCriteria:
+          type: array
+          items:
+            type: string
+          maxItems: 50
+        provider:
+          type: string
+          enum: [anthropic, openai, claude-code]
+          default: anthropic
+        apiKey:
+          type: string
+        model:
+          type: string
+        maxSteps:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 25
+
+    ActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [click, doubleClick, type, keyPress, scroll, drag, wait]
+        x:
+          type: number
+          minimum: 0
+          maximum: 10000
+        y:
+          type: number
+          minimum: 0
+          maximum: 10000
+        text:
+          type: string
+          maxLength: 50000
+        key:
+          type: string
+        modifiers:
+          type: array
+          items:
+            type: string
+            enum: [command, cmd, shift, option, alt, control, ctrl]
+        deltaY:
+          type: integer
+        deltaX:
+          type: integer
+        fromX:
+          type: number
+        fromY:
+          type: number
+        toX:
+          type: number
+        toY:
+          type: number
+        seconds:
+          type: number
+          minimum: 0
+          maximum: 300
+
+    SessionResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        displayID:
+          type: integer
+        appPID:
+          type: integer
+        isRunning:
+          type: boolean
+
+    SessionInfoResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        displayID:
+          type: integer
+        appPID:
+          type: integer
+        isRunning:
+          type: boolean
+        actionCount:
+          type: integer
+
+    TestResultResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        success:
+          type: boolean
+        summary:
+          type: string
+        stepCount:
+          type: integer
+        duration:
+          type: number
+
+    ScreenshotResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        format:
+          type: string
+        base64Data:
+          type: string
+        sizeKB:
+          type: integer
+
+    DisplayInfoResponse:
+      type: object
+      properties:
+        displayID:
+          type: integer
+        width:
+          type: integer
+        height:
+          type: integer
+        isMain:
+          type: boolean
+
+    PermissionsResponse:
+      type: object
+      properties:
+        screenRecording:
+          type: boolean
+        accessibility:
+          type: boolean
+        allGranted:
+          type: boolean
+
+    HealthResponse:
+      type: object
+      properties:
+        version:
+          type: string
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        uptime:
+          type: number
+        activeSessions:
+          type: integer
+        permissions:
+          $ref: '#/components/schemas/PermissionsResponse'
+        virtualDisplayAvailable:
+          type: boolean
+        timestamp:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    AuditEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        requestId:
+          type: string
+        action:
+          type: string
+        sessionId:
+          type: string
+        outcome:
+          type: string
+          enum: [success, error, denied]
+        durationMs:
+          type: integer

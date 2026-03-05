@@ -10,22 +10,29 @@ struct IsolatedHTTPServer {
         let port = Int(ProcessInfo.processInfo.environment["IST_PORT"] ?? "7100") ?? 7100
         // Bug 1 fix: read the IST_TOKEN env var so the handler can enforce auth
         let token = ProcessInfo.processInfo.environment["IST_TOKEN"]
+        let corsEnv = ProcessInfo.processInfo.environment["IST_CORS_ORIGINS"]
+        let allowedOrigins = corsEnv?.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            ?? ["http://localhost:*", "http://127.0.0.1:*"]
+
+        let rateBurst = Double(ProcessInfo.processInfo.environment["IST_RATE_BURST"] ?? "100") ?? 100
+        let rateLimit = Double(ProcessInfo.processInfo.environment["IST_RATE_LIMIT"] ?? "10") ?? 10
+        let rateLimiter = RateLimiter(maxTokens: rateBurst, refillRate: rateLimit)
+
         let manager = SessionManager()
+        await manager.startCleanupLoop()
 
         // Advertise for editor discovery
         try? DiscoveryService.advertise(info: .init(httpPort: port))
 
+        let router = Router(sessionManager: manager)
+
         // Handle graceful shutdown.
-        // SessionManager is an actor, so stopAll() must be called from an async
-        // context. We capture manager in the DispatchSource handler, dispatch a
-        // Task for the async work, and use a semaphore to block until cleanup
-        // finishes before calling exit(0). A 5-second timeout prevents a hang if
-        // a session stop stalls.
         let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signalSource.setEventHandler {
+            // Begin graceful shutdown: reject new requests
+            router.beginShutdown()
             let shutdownSemaphore = DispatchSemaphore(value: 0)
             Task {
-                // Stop all active sessions so launched apps are not orphaned.
                 await manager.stopAll()
                 DiscoveryService.remove()
                 shutdownSemaphore.signal()
@@ -34,7 +41,7 @@ struct IsolatedHTTPServer {
             exit(0)
         }
         signalSource.resume()
-        signal(SIGINT, SIG_IGN) // Let DispatchSource handle it
+        signal(SIGINT, SIG_IGN)
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
         defer {
@@ -42,15 +49,13 @@ struct IsolatedHTTPServer {
             DiscoveryService.remove()
         }
 
-        let router = Router(sessionManager: manager)
-
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
                     // Bug 1 fix: pass the token down to each handler instance
-                    channel.pipeline.addHandler(HTTPHandler(router: router, token: token))
+                    channel.pipeline.addHandler(HTTPHandler(router: router, token: token, allowedOrigins: allowedOrigins, rateLimiter: rateLimiter))
                 }
             }
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -71,6 +76,8 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     private let router: Router
     // Bug 1 fix: store the token so every request can be checked
     private let token: String?
+    private let allowedOrigins: [String]
+    private let rateLimiter: RateLimiter
 
     // Bug 2 fix: 10 MB body size limit constant
     private static let maxBodySize = 10 * 1024 * 1024  // 10 MB
@@ -83,9 +90,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     }
     private var pending: PendingRequest?
 
-    init(router: Router, token: String?) {
+    init(router: Router, token: String?, allowedOrigins: [String], rateLimiter: RateLimiter) {
         self.router = router
         self.token = token
+        self.allowedOrigins = allowedOrigins
+        self.rateLimiter = rateLimiter
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -130,23 +139,44 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
             let ctx = context
             let capturedToken = token
 
+            let capturedRateLimiter = rateLimiter
             Task {
-                // Bug 1 fix: enforce token auth for every non-OPTIONS, non-health
-                // request when IST_TOKEN is configured.
+                // Generate or preserve request ID for tracing
+                let requestId = snapshot.head.headers.first(name: "X-Request-ID") ?? UUID().uuidString
+                let requestOrigin = snapshot.head.headers.first(name: "Origin")
+
+                // Rate limiting (skip for health checks and OPTIONS)
                 let method = snapshot.head.method
                 let uri = snapshot.head.uri
                 let path = uri.components(separatedBy: "?").first ?? uri
                 let parts = path.split(separator: "/").map(String.init)
                 let isHealthCheck = method == .GET && (parts.isEmpty || parts == ["health"])
+                let isMetrics = method == .GET && parts == ["metrics"]
                 let isOptions = method == .OPTIONS
 
+                if !isOptions && !isHealthCheck && !isMetrics {
+                    let clientIP = ctx.remoteAddress?.description ?? "unknown"
+                    if !capturedRateLimiter.allow(clientIP: clientIP) {
+                        let retryAfter = capturedRateLimiter.retryAfter(clientIP: clientIP)
+                        let tooMany = Router.HTTPResponse.error(.tooManyRequests, "Rate limit exceeded. Retry after \(retryAfter) seconds.")
+                        ctx.eventLoop.execute {
+                            var headers = HTTPHeaders()
+                            headers.add(name: "Retry-After", value: "\(retryAfter)")
+                            self.sendResponse(context: ctx, version: snapshot.head.version, response: tooMany, requestOrigin: requestOrigin, requestId: requestId)
+                        }
+                        return
+                    }
+                }
+
+                // Bug 1 fix: enforce token auth for every non-OPTIONS, non-health
+                // request when IST_TOKEN is configured.
                 if let required = capturedToken, !required.isEmpty, !isOptions, !isHealthCheck {
                     let authHeader = snapshot.head.headers.first(name: "Authorization") ?? ""
                     let expectedBearer = "Bearer \(required)"
                     if authHeader != expectedBearer {
                         let unauthorized = Router.HTTPResponse.error(.unauthorized, "Invalid or missing token")
                         ctx.eventLoop.execute {
-                            self.sendResponse(context: ctx, version: snapshot.head.version, response: unauthorized)
+                            self.sendResponse(context: ctx, version: snapshot.head.version, response: unauthorized, requestOrigin: requestOrigin, requestId: requestId)
                         }
                         return
                     }
@@ -161,7 +191,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
                 // Send response on the event loop
                 ctx.eventLoop.execute {
-                    self.sendResponse(context: ctx, version: snapshot.head.version, response: response)
+                    self.sendResponse(context: ctx, version: snapshot.head.version, response: response, requestOrigin: requestOrigin, requestId: requestId)
                 }
             }
         }
@@ -170,13 +200,28 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     // MARK: - Private helpers
 
     /// Write a fully-formed HTTPResponse onto the channel.
-    private func sendResponse(context: ChannelHandlerContext, version: HTTPVersion, response: Router.HTTPResponse) {
+    private func sendResponse(context: ChannelHandlerContext, version: HTTPVersion, response: Router.HTTPResponse, requestOrigin: String? = nil, requestId: String? = nil) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: response.contentType)
         headers.add(name: "Content-Length", value: "\(response.body.count)")
-        headers.add(name: "Access-Control-Allow-Origin", value: "*")
+
+        // CORS: match against allowed origins instead of returning *
+        if let origin = requestOrigin, matchesCORSOrigin(origin) {
+            headers.add(name: "Access-Control-Allow-Origin", value: origin)
+            headers.add(name: "Vary", value: "Origin")
+        }
         headers.add(name: "Access-Control-Allow-Methods", value: "GET, POST, DELETE, OPTIONS")
         headers.add(name: "Access-Control-Allow-Headers", value: "Content-Type, Authorization")
+
+        // Security headers
+        headers.add(name: "X-Content-Type-Options", value: "nosniff")
+        headers.add(name: "X-Frame-Options", value: "DENY")
+        headers.add(name: "Content-Security-Policy", value: "default-src 'none'")
+
+        // Request ID for tracing
+        if let rid = requestId {
+            headers.add(name: "X-Request-ID", value: rid)
+        }
 
         let responseHead = HTTPResponseHead(version: version, status: response.status, headers: headers)
         context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
@@ -207,6 +252,22 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         buffer.writeBytes(bodyBytes)
         context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+    }
+
+    /// Check if an origin matches the allowed origins list.
+    /// Supports wildcard port matching: `http://localhost:*` matches `http://localhost:3000`.
+    private func matchesCORSOrigin(_ origin: String) -> Bool {
+        for allowed in allowedOrigins {
+            if allowed == "*" || allowed == origin { return true }
+            if allowed.hasSuffix(":*") {
+                let prefix = String(allowed.dropLast(1)) // "http://localhost:"
+                if origin.hasPrefix(prefix) { return true }
+                // Also match without port (e.g., "http://localhost" matches "http://localhost:*")
+                let basePrefix = String(allowed.dropLast(2)) // "http://localhost"
+                if origin == basePrefix { return true }
+            }
+        }
+        return false
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {

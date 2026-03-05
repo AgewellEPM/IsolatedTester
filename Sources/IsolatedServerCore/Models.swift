@@ -191,13 +191,49 @@ public struct ErrorResponse: Codable, Sendable {
 
 public struct HealthResponse: Codable, Sendable {
     public let version: String
-    public let status: String
+    public let status: String  // "healthy", "degraded", "unhealthy"
     public let uptime: TimeInterval
+    public let activeSessions: Int
+    public let permissions: PermissionsResponse
+    public let virtualDisplayAvailable: Bool
+    public let timestamp: String
 
-    public init(version: String, status: String, uptime: TimeInterval) {
+    public init(version: String, status: String, uptime: TimeInterval,
+                activeSessions: Int = 0, permissions: PermissionsResponse = .init(screenRecording: false, accessibility: false, allGranted: false),
+                virtualDisplayAvailable: Bool = false, timestamp: String = "") {
         self.version = version
         self.status = status
         self.uptime = uptime
+        self.activeSessions = activeSessions
+        self.permissions = permissions
+        self.virtualDisplayAvailable = virtualDisplayAvailable
+        self.timestamp = timestamp
+    }
+}
+
+// MARK: - Accessibility
+
+public struct ElementSearchRequest: Codable, Sendable {
+    public let role: String?
+    public let label: String?
+    public let identifier: String?
+
+    public init(role: String? = nil, label: String? = nil, identifier: String? = nil) {
+        self.role = role
+        self.label = label
+        self.identifier = identifier
+    }
+}
+
+public struct ElementActionRequest: Codable, Sendable {
+    public let x: Double
+    public let y: Double
+    public let action: String  // "AXPress", "AXRaise", etc.
+
+    public init(x: Double, y: Double, action: String = "AXPress") {
+        self.x = x
+        self.y = y
+        self.action = action
     }
 }
 

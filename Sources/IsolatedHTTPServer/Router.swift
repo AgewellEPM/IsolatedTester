@@ -7,6 +7,9 @@ import IsolatedTesterKit
 final class Router: @unchecked Sendable {
     let sessionManager: SessionManager
     private let startTime = Date()
+    private var _shuttingDown = false
+    var isShuttingDown: Bool { _shuttingDown }
+    func beginShutdown() { _shuttingDown = true }
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -63,6 +66,11 @@ final class Router: @unchecked Sendable {
             return HTTPResponse(text: "")
         }
 
+        // Reject new requests during graceful shutdown
+        if isShuttingDown {
+            return .error(.serviceUnavailable, "Server is shutting down")
+        }
+
         // Route matching
         let parts = path.split(separator: "/").map(String.init)
 
@@ -91,6 +99,18 @@ final class Router: @unchecked Sendable {
             return await getReport(sessionId: parts[1])
         } else if method == .GET && parts.count == 3 && parts[0] == "sessions" && parts[2] == "log" {
             return await getLog(sessionId: parts[1])
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "cancel" {
+            return await cancelTest(sessionId: parts[1])
+        } else if method == .GET && parts.count == 3 && parts[0] == "sessions" && parts[2] == "elements" {
+            return await getElements(sessionId: parts[1])
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "find-element" {
+            return await findElement(sessionId: parts[1], body: body)
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "element-action" {
+            return await elementAction(sessionId: parts[1], body: body)
+        } else if method == .GET && parts == ["metrics"] {
+            return await metrics()
+        } else if method == .GET && parts == ["audit"] {
+            return await auditLog()
         } else {
             // Bug 7 fix: removed the dead `else if method == .OPTIONS` branch that
             // could never be reached (OPTIONS is handled unconditionally at the top).
@@ -102,7 +122,27 @@ final class Router: @unchecked Sendable {
 
     private func health() async -> HTTPResponse {
         let uptime = Date().timeIntervalSince(startTime)
-        let response = HealthResponse(version: "1.0.0", status: "ok", uptime: uptime)
+        let perms = await sessionManager.checkPermissions()
+        let activeSessions = await sessionManager.activeSessionCount
+        let virtualDisplayAvailable = NSClassFromString("CGVirtualDisplayDescriptor") != nil
+
+        let status: String
+        if !perms.allGranted {
+            status = "degraded"
+        } else {
+            status = "healthy"
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let response = HealthResponse(
+            version: "1.0.0",
+            status: status,
+            uptime: uptime,
+            activeSessions: activeSessions,
+            permissions: perms,
+            virtualDisplayAvailable: virtualDisplayAvailable,
+            timestamp: formatter.string(from: Date())
+        )
         return jsonResponse(response)
     }
 
@@ -119,6 +159,8 @@ final class Router: @unchecked Sendable {
     private func createSession(body: Data) async -> HTTPResponse {
         do {
             let request = try JSONDecoder().decode(CreateSessionRequest.self, from: body)
+            let count = await sessionManager.activeSessionCount
+            try RequestValidator.validate(request, activeSessionCount: count)
             let response = try await sessionManager.createSession(
                 appPath: request.appPath,
                 displayWidth: request.displayWidth ?? 1920,
@@ -166,6 +208,7 @@ final class Router: @unchecked Sendable {
     private func performAction(sessionId: String, body: Data) async -> HTTPResponse {
         do {
             let action = try JSONDecoder().decode(ActionRequest.self, from: body)
+            try RequestValidator.validate(action)
             try await sessionManager.performAction(sessionId: sessionId, action: action)
             return jsonResponse(["success": true])
         } catch {
@@ -176,14 +219,20 @@ final class Router: @unchecked Sendable {
     private func runTest(sessionId: String, body: Data) async -> HTTPResponse {
         do {
             let request = try JSONDecoder().decode(RunTestRequest.self, from: body)
+            try RequestValidator.validate(request)
             let provider = request.provider ?? "anthropic"
-            let apiKey = APIKeyResolver.resolve(
-                provider: provider,
-                explicit: request.apiKey
-            ) ?? ""
+            let apiKey: String
+            if provider.lowercased() == "claude-code" || provider.lowercased() == "claudecode" {
+                apiKey = "" // Claude Code CLI handles its own authentication
+            } else {
+                apiKey = APIKeyResolver.resolve(
+                    provider: provider,
+                    explicit: request.apiKey
+                ) ?? ""
 
-            guard !apiKey.isEmpty else {
-                return .error(.unauthorized, "API key required. Provide via request body, env var, config file, or Keychain.")
+                guard !apiKey.isEmpty else {
+                    return .error(.unauthorized, "API key required. Provide via request body, env var, config file, or Keychain. Or use provider: 'claude-code'.")
+                }
             }
 
             let response = try await sessionManager.runTest(
@@ -232,5 +281,77 @@ final class Router: @unchecked Sendable {
             return .error(.internalServerError, "Failed to encode response")
         }
         return HTTPResponse(json: data)
+    }
+
+    // MARK: - Accessibility Handlers
+
+    private func getElements(sessionId: String) async -> HTTPResponse {
+        do {
+            let summary = try await sessionManager.getInteractiveElements(sessionId: sessionId)
+            return jsonResponse(summary)
+        } catch {
+            return .error(.internalServerError, error.localizedDescription)
+        }
+    }
+
+    private func findElement(sessionId: String, body: Data) async -> HTTPResponse {
+        do {
+            let request = try JSONDecoder().decode(ElementSearchRequest.self, from: body)
+            let elements = try await sessionManager.findElements(
+                sessionId: sessionId,
+                role: request.role,
+                label: request.label,
+                identifier: request.identifier
+            )
+            return jsonResponse(elements)
+        } catch {
+            return .error(.badRequest, error.localizedDescription)
+        }
+    }
+
+    private func elementAction(sessionId: String, body: Data) async -> HTTPResponse {
+        do {
+            let request = try JSONDecoder().decode(ElementActionRequest.self, from: body)
+            let success = try await sessionManager.performElementAction(
+                sessionId: sessionId,
+                x: request.x,
+                y: request.y,
+                action: request.action
+            )
+            return jsonResponse(["success": success])
+        } catch {
+            return .error(.badRequest, error.localizedDescription)
+        }
+    }
+
+    // MARK: - Other Endpoints
+
+    private func cancelTest(sessionId: String) async -> HTTPResponse {
+        let cancelled = await sessionManager.cancelTest(sessionId)
+        let dict: [String: Any] = ["success": true, "cancelled": cancelled]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict) else {
+            return .error(.internalServerError, "Failed to encode response")
+        }
+        return HTTPResponse(json: data)
+    }
+
+    private func metrics() async -> HTTPResponse {
+        let sessions = await sessionManager.activeSessionCount
+        let uptime = Date().timeIntervalSince(startTime)
+        let text = """
+        # HELP isolated_active_sessions Number of active test sessions
+        # TYPE isolated_active_sessions gauge
+        isolated_active_sessions \(sessions)
+
+        # HELP isolated_uptime_seconds Server uptime in seconds
+        # TYPE isolated_uptime_seconds gauge
+        isolated_uptime_seconds \(String(format: "%.1f", uptime))
+        """
+        return HTTPResponse(text: text)
+    }
+
+    private func auditLog() async -> HTTPResponse {
+        // Placeholder for audit log - will be populated by AuditLog actor
+        return jsonResponse([] as [String])
     }
 }

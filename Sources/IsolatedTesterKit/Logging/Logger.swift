@@ -27,11 +27,21 @@ public enum ISTLogger {
     /// Current verbosity for CLI console output. Thread-safe via nonisolated(unsafe).
     nonisolated(unsafe) public static var verbosity: Verbosity = .normal
 
+    /// When true, output structured JSON logs instead of plain text.
+    /// Enable via IST_LOG_FORMAT=json environment variable.
+    nonisolated(unsafe) public static var structuredOutput: Bool = {
+        ProcessInfo.processInfo.environment["IST_LOG_FORMAT"]?.lowercased() == "json"
+    }()
+
     /// Print to stderr for CLI use (doesn't pollute stdout which may be used for JSON/MCP).
     /// Respects the current verbosity level — messages below the threshold are suppressed.
     public static func console(_ message: String, level: Verbosity = .normal) {
         guard level <= verbosity else { return }
-        FileHandle.standardError.write(Data((message + "\n").utf8))
+        if structuredOutput {
+            structured(level: level == .verbose ? "debug" : "info", message: message, category: "console")
+        } else {
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+        }
     }
 
     /// Log a debug message to stderr (only shown with --verbose).
@@ -47,7 +57,30 @@ public enum ISTLogger {
     /// Log an error message to stderr (always shown, even with --quiet).
     /// Uses .quiet level so it's never filtered out.
     public static func error(_ message: String) {
-        // Errors always print regardless of verbosity
-        FileHandle.standardError.write(Data((message + "\n").utf8))
+        if structuredOutput {
+            structured(level: "error", message: message, category: "error")
+        } else {
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+        }
+    }
+
+    /// Emit a structured JSON log line to stderr for log aggregation systems.
+    public static func structured(
+        level: String,
+        message: String,
+        category: String,
+        metadata: [String: String] = [:]
+    ) {
+        var entry: [String: String] = [
+            "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "level": level,
+            "category": category,
+            "message": message,
+        ]
+        for (k, v) in metadata { entry[k] = v }
+        if let data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]),
+           let line = String(data: data, encoding: .utf8) {
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
     }
 }

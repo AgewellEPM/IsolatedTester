@@ -55,5 +55,17 @@ let package = Package(
             name: "IsolatedTesterKitTests",
             dependencies: ["IsolatedTesterKit"]
         ),
+        .testTarget(
+            name: "IsolatedServerCoreTests",
+            dependencies: ["IsolatedServerCore", "IsolatedTesterKit"]
+        ),
+        .testTarget(
+            name: "IsolatedHTTPServerTests",
+            dependencies: [
+                "IsolatedServerCore",
+                "IsolatedTesterKit",
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
+        ),
     ]
 )

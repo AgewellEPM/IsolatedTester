@@ -66,6 +66,27 @@ final class MCPToolHandlers {
             tool("get_test_report", "Get test report for a session", [
                 param("sessionId", "string", "Session ID", required: true),
             ]),
+            tool("cancel_test", "Cancel a running AI test", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
+            tool("get_accessibility_tree", "Get the accessibility element tree for a session's app", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
+            tool("get_interactive_elements", "Get a flat list of interactive UI elements (buttons, fields, etc.)", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
+            tool("find_element", "Find accessibility elements by role, label, or identifier", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("role", "string", "AX role (e.g., AXButton, AXTextField)"),
+                param("label", "string", "Text label to search for (case-insensitive)"),
+                param("identifier", "string", "Accessibility identifier"),
+            ]),
+            tool("click_element", "Click an element using accessibility action at coordinates", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("x", "number", "X coordinate of the element", required: true),
+                param("y", "number", "Y coordinate of the element", required: true),
+                param("action", "string", "AX action name (default: AXPress)"),
+            ]),
         ]
     }
 
@@ -179,6 +200,36 @@ final class MCPToolHandlers {
                     // Report not found is a logical error — signal isError
                     return (encode(ErrorResponse(error: "No report found", code: "NOT_FOUND")), true)
                 }
+
+            case "cancel_test":
+                let cancelled = await sessionManager.cancelTest(args["sessionId"] as? String ?? "")
+                result = "{\"success\": true, \"cancelled\": \(cancelled)}"
+
+            case "get_accessibility_tree":
+                let tree = try await sessionManager.getAccessibilityTree(sessionId: args["sessionId"] as? String ?? "")
+                result = encode(tree)
+
+            case "get_interactive_elements":
+                let summary = try await sessionManager.getInteractiveElements(sessionId: args["sessionId"] as? String ?? "")
+                result = encode(summary)
+
+            case "find_element":
+                let elements = try await sessionManager.findElements(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    role: args["role"] as? String,
+                    label: args["label"] as? String,
+                    identifier: args["identifier"] as? String
+                )
+                result = encode(elements)
+
+            case "click_element":
+                let success = try await sessionManager.performElementAction(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    x: args["x"] as? Double ?? 0,
+                    y: args["y"] as? Double ?? 0,
+                    action: args["action"] as? String ?? "AXPress"
+                )
+                result = "{\"success\": \(success)}"
 
             default:
                 // Unknown tool is an error

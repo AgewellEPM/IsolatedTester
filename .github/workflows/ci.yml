@@ -8,20 +8,43 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            xcode: '15.4'
+          - os: macos-15
+            xcode: '16.0'
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode_15.2.app || true
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app || sudo xcode-select -s $(ls -d /Applications/Xcode*.app | tail -1) || true
+
+      - name: Install SwiftLint
+        run: brew install swiftlint || true
+
+      - name: Lint
+        run: swiftlint lint --strict 2>&1 || true  # Non-blocking initially
 
       - name: Build
         run: swift build
 
       - name: Test
-        run: swift test
+        run: swift test --enable-code-coverage
         env:
           IST_SKIP_INTEGRATION_TESTS: "1"
+
+      - name: Coverage Report
+        run: |
+          BIN_PATH=$(swift build --show-bin-path)
+          XCTEST_PATH=$(find "$BIN_PATH" -name "*.xctest" -type d | head -1)
+          PROFDATA=$(find .build -name "default.profdata" -type f | head -1)
+          if [ -n "$XCTEST_PATH" ] && [ -n "$PROFDATA" ]; then
+            EXEC_PATH="$XCTEST_PATH/Contents/MacOS/$(basename "$XCTEST_PATH" .xctest)"
+            xcrun llvm-cov report "$EXEC_PATH" -instr-profile "$PROFDATA" -ignore-filename-regex '.build/' || true
+          fi
 
       - name: Build Release
         run: swift build -c release
@@ -39,10 +62,16 @@ jobs:
       - name: Sign
         run: make sign
 
+      - name: Generate SBOM
+        run: |
+          swift package show-dependencies --format json > sbom-dependencies.json
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             .build/release/isolated
             .build/release/isolated-mcp
             .build/release/isolated-http
+            sbom-dependencies.json

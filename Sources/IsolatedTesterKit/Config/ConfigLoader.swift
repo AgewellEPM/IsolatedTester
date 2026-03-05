@@ -1,7 +1,8 @@
 import Foundation
 
 /// Loads configuration from YAML or JSON files.
-/// Search order: explicit path > .isolatedtester.yml in cwd > ~/.isolatedtester.yml > defaults
+/// Search order: explicit path > env-specific in cwd > base in cwd > env-specific in home > base in home > defaults
+/// Set IST_ENV to load environment-specific config (e.g., .isolatedtester.production.yml)
 public struct ConfigLoader {
 
     public static func load(explicitPath: String? = nil) throws -> Configuration {
@@ -10,30 +11,47 @@ public struct ConfigLoader {
             return try loadFromFile(path)
         }
 
-        // 2. Try .isolatedtester.yml in current directory
-        let cwdConfig = FileManager.default.currentDirectoryPath + "/.isolatedtester.yml"
-        if FileManager.default.fileExists(atPath: cwdConfig) {
-            return try loadFromFile(cwdConfig)
+        let env = ProcessInfo.processInfo.environment["IST_ENV"]
+        let cwd = FileManager.default.currentDirectoryPath
+        let home = NSHomeDirectory()
+
+        // 2. Try env-specific config in cwd
+        if let env = env {
+            for ext in ["yml", "json"] {
+                let path = "\(cwd)/.isolatedtester.\(env).\(ext)"
+                if FileManager.default.fileExists(atPath: path) {
+                    return try loadFromFile(path)
+                }
+            }
         }
 
-        // 3. Try .isolatedtester.json in current directory (alternative format)
-        let cwdJSON = FileManager.default.currentDirectoryPath + "/.isolatedtester.json"
-        if FileManager.default.fileExists(atPath: cwdJSON) {
-            return try loadFromFile(cwdJSON)
+        // 3. Try base config in cwd
+        for ext in ["yml", "json"] {
+            let path = "\(cwd)/.isolatedtester.\(ext)"
+            if FileManager.default.fileExists(atPath: path) {
+                return try loadFromFile(path)
+            }
         }
 
-        // 4. Try home directory
-        let homeConfig = NSHomeDirectory() + "/.isolatedtester.yml"
-        if FileManager.default.fileExists(atPath: homeConfig) {
-            return try loadFromFile(homeConfig)
+        // 4. Try env-specific config in home
+        if let env = env {
+            for ext in ["yml", "json"] {
+                let path = "\(home)/.isolatedtester.\(env).\(ext)"
+                if FileManager.default.fileExists(atPath: path) {
+                    return try loadFromFile(path)
+                }
+            }
         }
 
-        let homeJSON = NSHomeDirectory() + "/.isolatedtester.json"
-        if FileManager.default.fileExists(atPath: homeJSON) {
-            return try loadFromFile(homeJSON)
+        // 5. Try base config in home
+        for ext in ["yml", "json"] {
+            let path = "\(home)/.isolatedtester.\(ext)"
+            if FileManager.default.fileExists(atPath: path) {
+                return try loadFromFile(path)
+            }
         }
 
-        // 5. Return defaults
+        // 6. Return defaults
         return .default
     }
 

@@ -114,6 +114,49 @@ public struct Configuration: Codable, Sendable {
 
     public static let `default` = Configuration()
 
+    /// Validate configuration values are within acceptable bounds.
+    /// Call this at startup to catch misconfigurations early.
+    public func validate() throws {
+        let validProviders = ["anthropic", "openai", "claude-code", "claudecode"]
+        guard validProviders.contains(provider.lowercased()) else {
+            throw ConfigError.parseError("Unknown provider '\(provider)'. Valid: \(validProviders.joined(separator: ", "))")
+        }
+        guard maxSteps >= 1 && maxSteps <= 500 else {
+            throw ConfigError.parseError("maxSteps must be 1-500, got \(maxSteps)")
+        }
+        guard actionDelay >= 0 && actionDelay <= 30 else {
+            throw ConfigError.parseError("actionDelay must be 0-30, got \(actionDelay)")
+        }
+        let validFormats = ["png", "jpeg"]
+        guard validFormats.contains(screenshotFormat.lowercased()) else {
+            throw ConfigError.parseError("screenshotFormat must be png or jpeg, got '\(screenshotFormat)'")
+        }
+        guard display.width >= 320 && display.width <= 7680 else {
+            throw ConfigError.parseError("display.width must be 320-7680, got \(display.width)")
+        }
+        guard display.height >= 320 && display.height <= 7680 else {
+            throw ConfigError.parseError("display.height must be 320-7680, got \(display.height)")
+        }
+        guard display.ppi >= 72 && display.ppi <= 600 else {
+            throw ConfigError.parseError("display.ppi must be 72-600, got \(display.ppi)")
+        }
+        guard retry.maxRetries >= 0 && retry.maxRetries <= 100 else {
+            throw ConfigError.parseError("retry.maxRetries must be 0-100, got \(retry.maxRetries)")
+        }
+        guard retry.retryDelay >= 0 && retry.retryDelay <= 60 else {
+            throw ConfigError.parseError("retry.retryDelay must be 0-60, got \(retry.retryDelay)")
+        }
+        guard timeouts.apiCall >= 1 && timeouts.apiCall <= 600 else {
+            throw ConfigError.parseError("timeouts.apiCall must be 1-600, got \(timeouts.apiCall)")
+        }
+        guard timeouts.appLaunch >= 1 && timeouts.appLaunch <= 120 else {
+            throw ConfigError.parseError("timeouts.appLaunch must be 1-120, got \(timeouts.appLaunch)")
+        }
+        guard timeouts.sessionTotal >= 10 && timeouts.sessionTotal <= 86400 else {
+            throw ConfigError.parseError("timeouts.sessionTotal must be 10-86400, got \(timeouts.sessionTotal)")
+        }
+    }
+
     /// Merge CLI overrides on top of config file values. Non-nil CLI values win.
     public func merging(
         provider: String? = nil,
