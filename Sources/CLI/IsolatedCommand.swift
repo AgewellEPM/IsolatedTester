@@ -208,7 +208,7 @@ struct Test: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Test objective description")
     var objective: String
 
-    @Option(name: .long, help: "AI provider: anthropic or openai")
+    @Option(name: .long, help: "AI provider: anthropic, openai, or claude-code")
     var provider: String?
 
     @Option(name: .long, help: "AI model override")
@@ -251,18 +251,27 @@ struct Test: AsyncParsableCommand {
         let appURL = URL(fileURLWithPath: appPath)
 
         // 2. Resolve API key via unified resolver (CLI flag > env var > config file > Keychain)
+        // Claude Code CLI manages its own auth — no API key needed
         let resolvedProvider = mergedConfig.provider
-        guard let resolvedKey = APIKeyResolver.resolve(
-            provider: resolvedProvider,
-            explicit: apiKey,
-            config: mergedConfig
-        ) else {
-            ISTLogger.error("Error: No API key found. Options:")
-            ISTLogger.error("  --api-key <key>")
-            ISTLogger.error("  ANTHROPIC_API_KEY or OPENAI_API_KEY env var")
-            ISTLogger.error("  .isolatedtester.yml config file (api_key field)")
-            ISTLogger.error("  macOS Keychain (com.isolatedtester.apikeys)")
-            throw ExitCode.failure
+        let resolvedKey: String
+        if resolvedProvider.lowercased() == "claude-code" {
+            resolvedKey = "" // Claude Code CLI handles its own authentication
+            ISTLogger.info("Using Claude Code CLI as AI provider (no API key needed)")
+        } else {
+            guard let key = APIKeyResolver.resolve(
+                provider: resolvedProvider,
+                explicit: apiKey,
+                config: mergedConfig
+            ) else {
+                ISTLogger.error("Error: No API key found. Options:")
+                ISTLogger.error("  --api-key <key>")
+                ISTLogger.error("  ANTHROPIC_API_KEY or OPENAI_API_KEY env var")
+                ISTLogger.error("  .isolatedtester.yml config file (api_key field)")
+                ISTLogger.error("  macOS Keychain (com.isolatedtester.apikeys)")
+                ISTLogger.error("  Or use --provider claude-code (no key needed)")
+                throw ExitCode.failure
+            }
+            resolvedKey = key
         }
 
         // 3. Start session
@@ -272,7 +281,12 @@ struct Test: AsyncParsableCommand {
         ISTLogger.info("Session \(state.sessionID) started (PID: \(state.appPID ?? 0))")
 
         // 4. Configure agent with config values
-        let aiProvider: AITestAgent.AIProvider = resolvedProvider.lowercased() == "openai" ? .openai : .anthropic
+        let aiProvider: AITestAgent.AIProvider
+        switch resolvedProvider.lowercased() {
+        case "openai": aiProvider = .openai
+        case "claude-code", "claudecode": aiProvider = .claudeCode
+        default: aiProvider = .anthropic
+        }
         let screenshotFmt: ScreenCapture.ImageFormat = mergedConfig.screenshotFormat == "png" ? .png : .jpeg
 
         let agentConfig = AITestAgent.AgentConfig(

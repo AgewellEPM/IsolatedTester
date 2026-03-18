@@ -16,7 +16,7 @@ public final class AITestAgent: @unchecked Sendable {
 
         public init(
             provider: AIProvider = .anthropic,
-            apiKey: String,
+            apiKey: String = "",
             model: String? = nil,
             maxSteps: Int = 25,
             actionDelay: Double = 0.5,
@@ -24,7 +24,14 @@ public final class AITestAgent: @unchecked Sendable {
         ) {
             self.provider = provider
             self.apiKey = apiKey
-            self.model = model ?? (provider == .openai ? "gpt-4o" : "claude-sonnet-4-20250514")
+            switch provider {
+            case .openai:
+                self.model = model ?? "gpt-4o"
+            case .claudeCode:
+                self.model = model ?? "sonnet"
+            case .anthropic:
+                self.model = model ?? "claude-sonnet-4-20250514"
+            }
             self.maxSteps = maxSteps
             self.actionDelay = actionDelay
             self.screenshotFormat = screenshotFormat
@@ -34,6 +41,7 @@ public final class AITestAgent: @unchecked Sendable {
     public enum AIProvider: String, Sendable, Codable {
         case anthropic
         case openai
+        case claudeCode = "claude-code"
     }
 
     public struct TestObjective: Sendable {
@@ -252,6 +260,12 @@ public final class AITestAgent: @unchecked Sendable {
                 history: history,
                 screenshot: screenshot
             )
+        case .claudeCode:
+            return try await callClaudeCode(
+                system: systemPrompt,
+                history: history,
+                screenshot: screenshot
+            )
         }
     }
 
@@ -390,6 +404,119 @@ public final class AITestAgent: @unchecked Sendable {
         return try parseAIResponse(data, provider: .openai)
     }
 
+    // MARK: - Claude Code CLI
+
+    /// Resolve the path to the `claude` CLI binary, searching common locations.
+    private static func findClaudeBinary() -> String? {
+        let candidates = [
+            "\(NSHomeDirectory())/.local/bin/claude",
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "\(NSHomeDirectory())/.claude/local/bin/claude",
+        ]
+        for path in candidates {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
+    }
+
+    private func callClaudeCode(
+        system: String,
+        history: String,
+        screenshot: Data
+    ) async throws -> (AgentAction, String) {
+        guard let claudePath = Self.findClaudeBinary() else {
+            throw AgentError.apiError(
+                "Claude Code CLI not found. Install from https://claude.ai/claude-code " +
+                "or ensure 'claude' is in ~/.local/bin/, /usr/local/bin/, or /opt/homebrew/bin/"
+            )
+        }
+
+        // 1. Save screenshot to temp file
+        let ext = config.screenshotFormat == .jpeg ? "jpg" : "png"
+        let tempPath = NSTemporaryDirectory() + "ist_screenshot_\(UUID().uuidString.prefix(8)).\(ext)"
+        try screenshot.write(to: URL(fileURLWithPath: tempPath))
+        defer { try? FileManager.default.removeItem(atPath: tempPath) }
+
+        // 2. Build the prompt — reference the screenshot file for Claude's Read tool
+        let userPrompt: String
+        if history.isEmpty {
+            userPrompt = "Read the image file at \(tempPath) and analyze it. This is the current state of the app being tested. What should I do first?"
+        } else {
+            userPrompt = "Read the image file at \(tempPath) and analyze it. Previous actions:\n\(history)\n\nThis is the current state. What should I do next?"
+        }
+
+        // 3. Run claude CLI asynchronously
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: claudePath)
+        process.arguments = [
+            "-p", userPrompt,
+            "--append-system-prompt", system + "\n\nIMPORTANT: Respond ONLY with valid JSON containing 'reasoning' and 'action' fields. No other text.",
+            "--output-format", "json",
+            "--allowedTools", "Read",
+            "--model", config.model,
+            "--no-session-persistence",
+        ]
+
+        // Remove CLAUDECODE env var to prevent nested session detection
+        var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "CLAUDECODE")
+        env.removeValue(forKey: "CLAUDE_CODE")
+        process.environment = env
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        ISTLogger.agent.info("Calling Claude Code CLI: \(claudePath) -p <prompt> --model \(self.config.model)")
+
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { proc in
+                let output = stdout.fileHandleForReading.readDataToEndOfFile()
+                if proc.terminationStatus != 0 {
+                    let errOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let errStr = String(data: errOutput, encoding: .utf8) ?? "Unknown error"
+                    continuation.resume(throwing: AgentError.apiError("Claude Code exited with status \(proc.terminationStatus): \(errStr.prefix(500))"))
+                } else {
+                    continuation.resume(returning: output)
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: AgentError.apiError("Failed to launch Claude Code: \(error.localizedDescription)"))
+            }
+        }
+
+        // 4. Parse the response
+        // --output-format json returns: {"type":"result","subtype":"success","cost_usd":...,"result":"<text>","session_id":"..."}
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let rawText = String(data: data.prefix(1000), encoding: .utf8) ?? "<binary>"
+            throw AgentError.invalidResponse("Claude Code response is not JSON: \(rawText)")
+        }
+
+        // Extract the result text from Claude Code's JSON envelope
+        guard let resultText = json["result"] as? String else {
+            // Maybe the full response is the action JSON directly
+            if let _ = json["reasoning"] as? String {
+                return try parseActionJSON(json)
+            }
+            throw AgentError.invalidResponse("Missing 'result' in Claude Code response. Keys: \(json.keys.joined(separator: ", "))")
+        }
+
+        // 5. Extract action JSON from the result text
+        let cleanedText = Self.extractJSON(from: resultText)
+        guard let actionData = cleanedText.data(using: .utf8),
+              let actionJSON = try JSONSerialization.jsonObject(with: actionData) as? [String: Any] else {
+            throw AgentError.invalidResponse("Claude Code result is not valid JSON: \(resultText.prefix(300))")
+        }
+
+        return try parseActionJSON(actionJSON)
+    }
+
     // MARK: - Parsing
 
     private func buildRequest(url: String, body: [String: Any], headers: [String: String]) throws -> URLRequest {
@@ -436,6 +563,9 @@ public final class AITestAgent: @unchecked Sendable {
                 throw AgentError.invalidResponse("Missing content in OpenAI response: \(json.keys.joined(separator: ", "))")
             }
             text = t
+        case .claudeCode:
+            // Claude Code responses are handled in callClaudeCode — should not reach here
+            throw AgentError.invalidResponse("parseAIResponse should not be called for Claude Code provider")
         }
 
         // Parse the JSON action from the AI's response, stripping markdown fences if present
@@ -445,6 +575,11 @@ public final class AITestAgent: @unchecked Sendable {
             throw AgentError.invalidResponse("AI response is not valid JSON: \(text)")
         }
 
+        return try parseActionJSON(actionJSON)
+    }
+
+    /// Shared action JSON parser used by all providers.
+    private func parseActionJSON(_ actionJSON: [String: Any]) throws -> (AgentAction, String) {
         let reasoning = actionJSON["reasoning"] as? String ?? ""
         guard let actionObj = actionJSON["action"] as? [String: Any],
               let actionType = actionObj["type"] as? String else {
