@@ -139,6 +139,7 @@ final class MCPToolHandlers {
                 result = encode(response)
 
             case "click":
+                if let blocked = await substrateBlock(args) { return blocked }
                 try await sessionManager.performAction(
                     sessionId: args["sessionId"] as? String ?? "",
                     action: ActionRequest(action: "click", x: args["x"] as? Double, y: args["y"] as? Double)
@@ -146,6 +147,7 @@ final class MCPToolHandlers {
                 result = "{\"success\": true}"
 
             case "type_text":
+                if let blocked = await substrateBlock(args) { return blocked }
                 try await sessionManager.performAction(
                     sessionId: args["sessionId"] as? String ?? "",
                     action: ActionRequest(action: "type", text: args["text"] as? String)
@@ -153,6 +155,7 @@ final class MCPToolHandlers {
                 result = "{\"success\": true}"
 
             case "key_press":
+                if let blocked = await substrateBlock(args) { return blocked }
                 try await sessionManager.performAction(
                     sessionId: args["sessionId"] as? String ?? "",
                     action: ActionRequest(action: "keyPress", key: args["key"] as? String)
@@ -224,6 +227,7 @@ final class MCPToolHandlers {
                 result = encode(elements)
 
             case "click_element":
+                if let blocked = await substrateBlock(args) { return blocked }
                 let success = try await sessionManager.performElementAction(
                     sessionId: args["sessionId"] as? String ?? "",
                     x: args["x"] as? Double ?? 0,
@@ -271,6 +275,18 @@ final class MCPToolHandlers {
     }
 
     // MARK: - Helpers
+
+    /// Self-substrate keystroke guard. Returns a populated (error, true) tuple when the
+    /// target session's window text is a self-restart of the Kist substrate, so the input
+    /// action must be refused; nil when it's safe to proceed. Fails open on unreadable AX.
+    private func substrateBlock(_ args: [String: Any]) async -> (result: String, isError: Bool)? {
+        let sessionId = args["sessionId"] as? String ?? ""
+        guard !sessionId.isEmpty else { return nil }
+        if let reason = await sessionManager.substrateInputRefusal(sessionId: sessionId) {
+            return (encode(ErrorResponse(error: reason, code: "SELF_SUBSTRATE_BLOCKED")), true)
+        }
+        return nil
+    }
 
     private func tool(_ name: String, _ description: String, _ properties: [[String: Any]]) -> [String: Any] {
         var props: [String: Any] = [:]

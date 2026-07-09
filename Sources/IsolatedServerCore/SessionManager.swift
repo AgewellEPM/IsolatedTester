@@ -295,6 +295,15 @@ public actor SessionManager {
         return introspector.introspect(pid: pid)
     }
 
+    /// Narrow self-substrate keystroke guard. Returns a refusal reason if the target
+    /// session's visible accessibility text shows a self-restart of the Kist substrate
+    /// (see `SubstrateGuard`), else nil. Fails OPEN: an unreadable AX tree blocks nothing
+    /// (precision over recall; the console's circuit breaker is the hard backstop).
+    public func substrateInputRefusal(sessionId: String) -> String? {
+        guard let tree = try? getAccessibilityTree(sessionId: sessionId) else { return nil }
+        return SubstrateGuard.selfRestartReason(inWindowText: SubstrateGuard.flatten(tree))
+    }
+
     /// Get a flattened summary of interactive elements.
     public func getInteractiveElements(sessionId: String) throws -> AXTreeSummary {
         guard let session = sessions[sessionId] else {
