@@ -1,0 +1,67 @@
+{
+  "name": "isolated-tester",
+  "version": "1.1.0",
+  "description": "AI-powered isolated app testing for macOS. Launch any .app on a virtual display, control it with vision-based AI, and verify behavior without taking over your screen.",
+  "author": "AgewellEPM",
+  "homepage": "https://github.com/AgewellEPM/IsolatedTester",
+  "license": "MIT",
+  "platforms": ["macOS"],
+  "minimumOS": "14.0",
+  "requirements": {
+    "permissions": ["Screen Recording", "Accessibility"],
+    "tools": ["swift", "xcode-command-line-tools"]
+  },
+  "mcp": {
+    "command": "isolated-mcp",
+    "transport": "stdio",
+    "toolCount": 19,
+    "tools": [
+      "create_session",
+      "run_test",
+      "screenshot",
+      "click",
+      "type_text",
+      "key_press",
+      "scroll",
+      "drag",
+      "list_sessions",
+      "stop_session",
+      "list_displays",
+      "check_permissions",
+      "get_test_report",
+      "cancel_test",
+      "get_accessibility_tree",
+      "get_interactive_elements",
+      "find_element",
+      "click_element",
+      "setup_status"
+    ]
+  },
+  "commands": [
+    {
+      "name": "test-app",
+      "description": "Launch and test a macOS app in an isolated virtual display",
+      "file": "commands/test-app.md"
+    },
+    {
+      "name": "test-screenshot",
+      "description": "Capture a screenshot from a running test session",
+      "file": "commands/test-screenshot.md"
+    },
+    {
+      "name": "test-elements",
+      "description": "Inspect accessibility elements of a running test session",
+      "file": "commands/test-elements.md"
+    },
+    {
+      "name": "test-cleanup",
+      "description": "Stop all active test sessions",
+      "file": "commands/test-cleanup.md"
+    }
+  ],
+  "install": {
+    "method": "build-from-source",
+    "script": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  }
+}

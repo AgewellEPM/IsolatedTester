@@ -1,0 +1,6 @@
+.build/
+bin/
+*.bak-*
+.isolated-tester-backup-*
+*.dSYM
+.DS_Store
