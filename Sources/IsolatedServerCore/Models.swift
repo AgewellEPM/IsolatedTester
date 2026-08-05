@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import IsolatedTesterKit
 
 // MARK: - Request Types
 
@@ -89,6 +90,94 @@ public struct SessionResponse: Codable, Sendable {
         self.appPID = appPID
         self.isRunning = isRunning
         self.windowsPlaced = windowsPlaced
+    }
+}
+
+public struct FrameRecord: Codable, Sendable {
+    public let ordinal: Int
+    public let path: String
+    public let sha256: String
+    public let bytes: Int
+    public let width: Int
+    public let height: Int
+    public let ageSeconds: Double
+
+    public init(ordinal: Int, path: String, sha256: String, bytes: Int,
+                width: Int, height: Int, ageSeconds: Double) {
+        self.ordinal = ordinal
+        self.path = path
+        self.sha256 = sha256
+        self.bytes = bytes
+        self.width = width
+        self.height = height
+        self.ageSeconds = ageSeconds
+    }
+}
+
+public struct FrameHistoryResponse: Codable, Sendable {
+    public let sessionId: String
+    /// True while the 1fps capture loop is running; false with `error` set
+    /// when it stopped (e.g. no Screen Recording grant).
+    public let active: Bool
+    public let error: String?
+    public let count: Int
+    public let capacity: Int
+    public let frames: [FrameRecord]
+
+    public init(sessionId: String, active: Bool, error: String?, count: Int,
+                capacity: Int, frames: [FrameRecord]) {
+        self.sessionId = sessionId
+        self.active = active
+        self.error = error
+        self.count = count
+        self.capacity = capacity
+        self.frames = frames
+    }
+}
+
+public struct FrameOCRResponse: Codable, Sendable {
+    public let sessionId: String
+    public let ordinal: Int
+    /// Digest of the exact bytes recognized — bound evidence.
+    public let frameSha256: String
+    public let width: Int
+    public let height: Int
+    public let observations: [FrameOCR.TextObservation]
+
+    public init(sessionId: String, ordinal: Int, frameSha256: String,
+                width: Int, height: Int, observations: [FrameOCR.TextObservation]) {
+        self.sessionId = sessionId
+        self.ordinal = ordinal
+        self.frameSha256 = frameSha256
+        self.width = width
+        self.height = height
+        self.observations = observations
+    }
+}
+
+public struct AsciiFrameResponse: Codable, Sendable {
+    public let sessionId: String
+    public let ordinal: Int
+    public let cols: Int
+    public let rows: Int
+    /// Convert grid → click coordinates: x = (col + 0.5) * pixelsPerCol,
+    /// y = (row + 0.5) * pixelsPerRow (capture pixels, top-left origin).
+    public let pixelsPerCol: Double
+    public let pixelsPerRow: Double
+    public let frameSha256: String
+    public let text: String
+
+    public init(sessionId: String, ordinal: Int, cols: Int, rows: Int,
+                pixelsPerCol: Double, pixelsPerRow: Double,
+                frameSha256: String, text: String) {
+        self.sessionId = sessionId
+        self.ordinal = ordinal
+        self.cols = cols
+        self.rows = rows
+        self.pixelsPerCol = pixelsPerCol
+        self.pixelsPerRow = pixelsPerRow
+        self.frameSha256 = frameSha256
+        self.text = text
     }
 }
 

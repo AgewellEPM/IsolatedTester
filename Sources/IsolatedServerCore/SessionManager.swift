@@ -91,12 +91,110 @@ public actor SessionManager {
         sessionCreatedAt[session.id] = now
         sessionLastActivity[session.id] = now
 
+        startFrameHistoryIfEnabled(session)
+
         return SessionResponse(
             sessionId: session.id,
             displayID: state.displayID,
             appPID: state.appPID.map { Int32($0) } ?? 0,
             isRunning: state.isRunning,
             windowsPlaced: state.windowsPlaced
+        )
+    }
+
+    /// Continuous visual memory is ON by default for every session
+    /// (IST_FRAME_HISTORY=0 disables; IST_FRAME_CAPACITY overrides the 300).
+    private func startFrameHistoryIfEnabled(_ session: TestSession) {
+        let env = ProcessInfo.processInfo.environment
+        guard env["IST_FRAME_HISTORY"] != "0" else { return }
+        let capacity = env["IST_FRAME_CAPACITY"].flatMap(Int.init) ?? 300
+        do {
+            try session.startFrameHistory(intervalSeconds: 1.0, capacity: capacity)
+        } catch {
+            ISTLogger.console("frame history failed to start for \(session.id): \(error)", level: .verbose)
+        }
+    }
+
+    /// Rolling frame history of a session (newest last).
+    public func frameHistory(sessionId: String, limit: Int = 50) throws -> FrameHistoryResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        let status = session.frameHistoryStatus
+        let store = session.frameHistoryStore
+        let now = ProcessInfo.processInfo.systemUptime
+        let frames = (store?.history(last: limit) ?? []).map {
+            FrameRecord(ordinal: $0.ordinal, path: $0.path, sha256: $0.sha256,
+                        bytes: $0.bytes, width: $0.width, height: $0.height,
+                        ageSeconds: max(0, now - $0.capturedAtUptime))
+        }
+        return FrameHistoryResponse(
+            sessionId: sessionId,
+            active: status.active,
+            error: status.error,
+            count: store?.count ?? 0,
+            capacity: store?.capacity ?? 0,
+            frames: frames
+        )
+    }
+
+    /// ASCII vision bridge: render a history frame (default: newest) as a
+    /// character grid with OCR text stamped in place — sight for text-only
+    /// models, with grid→pixel scale for acting on what they see.
+    public func asciiFrame(sessionId: String, ordinal: Int? = nil, cols: Int = 160,
+                           overlayText: Bool = true) throws -> AsciiFrameResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        guard let store = session.frameHistoryStore else {
+            throw ServerError.unknownAction("session \(sessionId) has no frame history")
+        }
+        let frame: FrameStore.Frame?
+        if let ordinal {
+            frame = store.frame(ordinal: ordinal)
+        } else {
+            frame = store.history(last: 1).last
+        }
+        guard let frame else {
+            throw ServerError.unknownAction("no frame available in session \(sessionId) history")
+        }
+        var overlay: [FrameOCR.TextObservation]? = nil
+        if overlayText {
+            overlay = (try? FrameOCR.recognize(path: frame.path, expectedSha256: frame.sha256))?.observations
+        }
+        let grid = try AsciiRenderer.render(path: frame.path, cols: cols, ocrOverlay: overlay)
+        return AsciiFrameResponse(
+            sessionId: sessionId,
+            ordinal: frame.ordinal,
+            cols: grid.cols,
+            rows: grid.rows,
+            pixelsPerCol: grid.pixelsPerCol,
+            pixelsPerRow: grid.pixelsPerRow,
+            frameSha256: grid.frameSha256,
+            text: grid.text
+        )
+    }
+
+    /// Frame-bound OCR on one history frame (sha256 verified before recognition).
+    public func ocrFrame(sessionId: String, ordinal: Int) throws -> FrameOCRResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        guard let store = session.frameHistoryStore,
+              let frame = store.frame(ordinal: ordinal) else {
+            throw ServerError.unknownAction("no frame \(ordinal) in session \(sessionId) history")
+        }
+        let result = try FrameOCR.recognize(path: frame.path, expectedSha256: frame.sha256)
+        return FrameOCRResponse(
+            sessionId: sessionId,
+            ordinal: ordinal,
+            frameSha256: result.frameSha256,
+            width: result.width,
+            height: result.height,
+            observations: result.observations
         )
     }
 
@@ -134,6 +232,7 @@ public actor SessionManager {
         sessions[session.id] = session
         sessionCreatedAt[session.id] = now
         sessionLastActivity[session.id] = now
+        startFrameHistoryIfEnabled(session)
         return SessionResponse(
             sessionId: session.id,
             displayID: state.displayID,

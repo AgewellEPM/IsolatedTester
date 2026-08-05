@@ -140,6 +140,10 @@ public final class TestSession: @unchecked Sendable {
 
     /// End the session: terminate app, destroy display.
     public func stop() {
+        stopFrameHistory()
+        // P2 will add a seal step; until a seal exists, a stopped session's
+        // frames are purged so ~/.isolated-tester doesn't accrete garbage.
+        frameHistoryStore?.purge()
         if let app, app.ownsProcess {
             let pid = app.pid
             launcher.terminateApp(pid: pid)
@@ -229,6 +233,101 @@ public final class TestSession: @unchecked Sendable {
             startedAt: app?.launchedAt ?? Date(),
             windowsPlaced: app?.windowsPlaced ?? false
         )
+    }
+
+    // MARK: - Frame History (the 1fps / 300-frame visual memory)
+
+    private var frameStore: FrameStore?
+    private var frameHistoryTask: Task<Void, Never>?
+    private var frameHistoryError: String?
+
+    /// Continuous ~1fps capture into a bounded on-disk ring (default 300
+    /// frames ≈ 5 minutes). Fails safe: five consecutive capture failures
+    /// (e.g. no Screen Recording grant) stop the loop with a recorded error
+    /// instead of spinning forever.
+    public func startFrameHistory(intervalSeconds: Double = 1.0, capacity: Int = 300) throws {
+        lock.lock()
+        let alreadyRunning = frameHistoryTask != nil
+        lock.unlock()
+        guard !alreadyRunning else { return }
+
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".isolated-tester/sessions/\(id)/frames", isDirectory: true)
+        let store = try FrameStore(directory: dir, capacity: capacity)
+
+        lock.lock()
+        frameStore = store
+        frameHistoryError = nil
+        lock.unlock()
+
+        let task = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                guard let self else { break }
+                do {
+                    // ScreenCaptureKit HANGS (not errors) without a Screen
+                    // Recording grant — race a deadline so the loop stays
+                    // honest and can report why it stopped.
+                    let shot = try await self.captureWithTimeout(seconds: 10)
+                    _ = try store.record(shot.imageData, width: shot.width, height: shot.height)
+                    consecutiveFailures = 0
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 5 {
+                        self.setFrameHistoryError(
+                            "frame history stopped after 5 consecutive capture failures: \(error.localizedDescription)")
+                        break
+                    }
+                }
+                try? await Task.sleep(nanoseconds: UInt64(intervalSeconds * 1_000_000_000))
+            }
+        }
+        lock.lock()
+        frameHistoryTask = task
+        lock.unlock()
+    }
+
+    public func stopFrameHistory() {
+        lock.lock()
+        let task = frameHistoryTask
+        frameHistoryTask = nil
+        lock.unlock()
+        task?.cancel()
+    }
+
+    public var frameHistoryStore: FrameStore? {
+        lock.lock()
+        defer { lock.unlock() }
+        return frameStore
+    }
+
+    /// (active, error) — active means the capture loop is still running.
+    public var frameHistoryStatus: (active: Bool, error: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (frameHistoryTask != nil && frameHistoryError == nil, frameHistoryError)
+    }
+
+    private func setFrameHistoryError(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        frameHistoryError = message
+        frameHistoryTask = nil
+    }
+
+    private func captureWithTimeout(seconds: Double) async throws -> ScreenCapture.CaptureResult {
+        try await withThrowingTaskGroup(of: ScreenCapture.CaptureResult.self) { group in
+            group.addTask { try await self.screenshot(format: .jpeg) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw DisplayError.captureFailed("frame capture timed out after \(Int(seconds))s (likely no Screen Recording grant)")
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw DisplayError.captureFailed("frame capture produced no result")
+            }
+            return first
+        }
     }
 
     /// Self-heal: if the app's windows never landed on the isolated display at

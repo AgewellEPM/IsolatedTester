@@ -40,6 +40,20 @@ final class MCPToolHandlers {
             tool("session_frame", "Export a PNG frame from an isolated session to an owner-private local file for vision analysis", [
                 param("sessionId", "string", "Session ID", required: true),
             ]),
+            tool("frame_history", "List the session's rolling ~1fps frame history (bounded ring, default 300 frames ≈ 5 min): ordinals, sha256 hashes, sizes, file paths — newest last", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("limit", "integer", "Max frames to return (default 50)"),
+            ]),
+            tool("ocr_frame", "Frame-bound OCR on one history frame: verifies the stored sha256 before recognizing, returns text observations with confidence and normalized bounds", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("ordinal", "integer", "Frame ordinal from frame_history", required: true),
+            ]),
+            tool("ascii_frame", "Vision for text-only models: render a history frame (default newest) as an ASCII character grid with on-screen text stamped at its true position. Convert grid to click coords: x=(col+0.5)*pixelsPerCol, y=(row+0.5)*pixelsPerRow", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("ordinal", "integer", "Frame ordinal (omit for newest)"),
+                param("cols", "integer", "Grid width in characters, 20-400 (default 160)"),
+                param("overlayText", "boolean", "Stamp OCR text into the grid (default true)"),
+            ]),
             tool("click", "Click at coordinates", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("x", "number", "X coordinate", required: true),
@@ -159,6 +173,29 @@ final class MCPToolHandlers {
                 )
                 result = encode(response)
 
+            case "frame_history":
+                let response = try await sessionManager.frameHistory(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    limit: args["limit"] as? Int ?? 50
+                )
+                result = encode(response)
+
+            case "ocr_frame":
+                let response = try await sessionManager.ocrFrame(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    ordinal: args["ordinal"] as? Int ?? -1
+                )
+                result = encode(response)
+
+            case "ascii_frame":
+                let response = try await sessionManager.asciiFrame(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    ordinal: args["ordinal"] as? Int,
+                    cols: args["cols"] as? Int ?? 160,
+                    overlayText: args["overlayText"] as? Bool ?? true
+                )
+                result = encode(response)
+
             case "click":
                 if let blocked = await substrateBlock(args) { return blocked }
                 try await sessionManager.performAction(
@@ -272,7 +309,7 @@ final class MCPToolHandlers {
                     ],
                     "virtualDisplayAvailable": virtualDisplayAvailable,
                     "activeSessions": activeSessions,
-                    "toolCount": 21,
+                    "toolCount": listTools().count,
                     "status": perms.allGranted ? "ready" : "permissions_required"
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
