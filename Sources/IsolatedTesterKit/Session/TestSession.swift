@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import Foundation
 
@@ -144,14 +145,25 @@ public final class TestSession: @unchecked Sendable {
         lock.lock()
         if stopped { lock.unlock(); return }
         stopped = true
+        let recorder = videoRecorder
         lock.unlock()
         // Await the capture loop's exit FIRST so no frame can append after the
         // seal snapshot — the seal must be the true terminal ledger entry.
         await stopFrameHistory()
+        // Finalize the movie (metadata was stamped at first frame), then seal +
+        // index so the footage is reviewable and queryable.
+        let videoPath = await recorder?.finish()
+        lock.lock(); sealedVideoPath = videoPath; lock.unlock()
         if let ledger = receipts {
             _ = try? ledger.seal(frames: frameHistoryStore?.history(last: Int.max) ?? [])
         }
+        writeSessionIndex(videoPath: videoPath)
         teardownResources()
+    }
+
+    public var sealedVideo: String? {
+        lock.lock(); defer { lock.unlock() }
+        return sealedVideoPath
     }
 
     /// Terminate the owned app and destroy the display. Shared by stop() and
@@ -166,6 +178,107 @@ public final class TestSession: @unchecked Sendable {
         app = nil
         display = nil
         input = nil
+    }
+
+    // MARK: - Reviewable footage: metadata + queryable index
+
+    /// A one-line auto-description of what the session did, from its action log
+    /// (the deterministic "what it is" that's always present; a richer AI
+    /// caption can be layered on later without changing this).
+    private func autoSummary() -> String {
+        lock.lock()
+        let objectiveText = objective
+        let actions = actionLog
+        let appName = app?.appURL.deletingPathExtension().lastPathComponent
+        lock.unlock()
+        let verbs = actions.map { $0.action }
+        var counts: [String: Int] = [:]
+        for v in verbs { counts[v, default: 0] += 1 }
+        let breakdown = counts.sorted { $0.value > $1.value }
+            .map { "\($0.value)× \($0.key)" }.joined(separator: ", ")
+        let head = objectiveText ?? (appName.map { "Session driving \($0)" } ?? "Isolated-tester session")
+        return actions.isEmpty ? head : "\(head) — \(actions.count) actions (\(breakdown))"
+    }
+
+    /// mp4 metadata documenting what this footage is, why it exists, and the
+    /// task performed — so a reviewer opening the file knows its provenance.
+    private func buildVideoMetadata() -> [AVMetadataItem] {
+        lock.lock()
+        let objectiveText = objective
+        let appName = app?.appURL.deletingPathExtension().lastPathComponent ?? "unknown app"
+        let chainHead = receipts?.chainHead ?? ""
+        let actionCount = actionLog.count
+        lock.unlock()
+        let summary = autoSummary()
+        let purpose = "IsolatedTester session recording. Purpose: tamper-evident VIDEO PROOF that "
+            + "an AI agent's automated work ran inside an isolated virtual display — reviewable "
+            + "confirmation of headless runs. Task: \(objectiveText ?? "(app: \(appName))"). "
+            + "Every frame + action is hash-chained (evidence chainHead \(chainHead.prefix(16))…)."
+        var items: [AVMetadataItem] = [
+            SessionVideoRecorder.item(.commonKeyTitle, "IsolatedTester \(id): \(objectiveText ?? appName)"),
+            SessionVideoRecorder.item(.commonKeyDescription, summary),
+            SessionVideoRecorder.item(.commonKeySoftware, "IsolatedTester \(IsolatedTesterVersion.current)"),
+            SessionVideoRecorder.userItem("session_id", id),
+            SessionVideoRecorder.userItem("objective", objectiveText ?? ""),
+            SessionVideoRecorder.userItem("app", appName),
+            SessionVideoRecorder.userItem("action_count", String(actionCount)),
+            SessionVideoRecorder.userItem("evidence_chain_head", chainHead),
+            SessionVideoRecorder.userItem("purpose", purpose),
+        ]
+        if let objectiveText { items.append(SessionVideoRecorder.item(.commonKeySubject, objectiveText)) }
+        return items
+    }
+
+    /// Write a per-session record and append to a global JSONL index so every
+    /// session's footage is queryable (id, video path, objective, actions,
+    /// outcome, evidence head) with one `grep`/`jq` over index.jsonl.
+    private func writeSessionIndex(videoPath: String?) {
+        lock.lock()
+        let objectiveText = objective
+        let appName = app?.appURL.deletingPathExtension().lastPathComponent ?? ""
+        let chainHead = receipts?.chainHead ?? ""
+        let actions = actionLog.map { ["at": ISO8601DateFormatter().string(from: $0.timestamp),
+                                       "action": $0.action, "details": $0.details] }
+        let sessionDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".isolated-tester/sessions/\(id)", isDirectory: true)
+        lock.unlock()
+
+        let record: [String: Any] = [
+            "sessionID": id,
+            "objective": objectiveText ?? "",
+            "app": appName,
+            "summary": autoSummary(),
+            "video": videoPath ?? "",
+            "actionCount": actions.count,
+            "actions": actions,
+            "evidenceChainHead": chainHead,
+            "sealJSON": sessionDir.appendingPathComponent("seal.json").path,
+        ]
+        // Per-session detail file.
+        if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .prettyPrinted]) {
+            let url = sessionDir.appendingPathComponent("session.json")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        // One-line-per-session global index (queryable across all footage).
+        let indexRecord: [String: Any] = [
+            "sessionID": id, "objective": objectiveText ?? "", "app": appName,
+            "summary": autoSummary(), "video": videoPath ?? "", "actionCount": actions.count,
+            "evidenceChainHead": chainHead,
+        ]
+        if let line = try? JSONSerialization.data(withJSONObject: indexRecord, options: [.sortedKeys]),
+           let text = String(data: line, encoding: .utf8) {
+            let indexURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".isolated-tester/sessions/index.jsonl")
+            let data = Data((text + "\n").utf8)
+            if let handle = try? FileHandle(forWritingTo: indexURL) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: indexURL, options: .atomic)
+            }
+        }
     }
 
     // MARK: - Actions
@@ -253,7 +366,23 @@ public final class TestSession: @unchecked Sendable {
     private var frameHistoryTask: Task<Void, Never>?
     private var frameHistoryError: String?
     private var receipts: SessionReceipts?
+    private var videoRecorder: SessionVideoRecorder?
+    private var sealedVideoPath: String?
     private var stopped = false
+    private var objective: String?   // what this session is for — stamped into the video + index
+
+    /// Set/replace the session's task objective (documented in the movie
+    /// metadata and the reviewable session index).
+    public func setObjective(_ text: String) {
+        lock.lock(); defer { lock.unlock() }
+        objective = text
+        receipts?.append(kind: "objective", detail: text)
+    }
+
+    public var currentObjective: String? {
+        lock.lock(); defer { lock.unlock() }
+        return objective
+    }
 
     /// Continuous ~1fps capture into a bounded on-disk ring (default 300
     /// frames ≈ 5 minutes). Fails safe: five consecutive capture failures
@@ -289,9 +418,29 @@ public final class TestSession: @unchecked Sendable {
             store.onEvict = { frame in
                 ledger.append(kind: "eviction", detail: "ordinal=\(frame.ordinal)", sha256: frame.sha256)
             }
+            // Movie recorder: encodes the WHOLE run (frames are appended at
+            // capture time, before the ring can evict them) to session.mp4.
+            // IST_VIDEO=0 disables; IST_VIDEO_FPS sets playback cadence.
+            let env = ProcessInfo.processInfo.environment
+            let recorder: SessionVideoRecorder?
+            if env["IST_VIDEO"] == "0" {
+                recorder = nil
+            } else {
+                let fps = env["IST_VIDEO_FPS"].flatMap(Int.init) ?? 6
+                let rec = SessionVideoRecorder(
+                    url: sessionDir.appendingPathComponent("session.mp4"), fps: fps)
+                rec.metadataProvider = { [weak self] in self?.buildVideoMetadata() ?? [] }
+                recorder = rec
+            }
+            // If an objective was set before capture started, mark it now that
+            // the ledger exists.
+            if let objectiveText = currentObjective {
+                ledger.append(kind: "objective", detail: objectiveText)
+            }
             lock.lock()
             frameStore = store
             receipts = ledger
+            videoRecorder = recorder
             lock.unlock()
         }
 
@@ -318,6 +467,9 @@ public final class TestSession: @unchecked Sendable {
                     // ScreenCaptureKit stall can't wedge the loop.
                     let shot = try await self.captureWithTimeout(seconds: 10)
                     _ = try store.record(shot.imageData, width: shot.width, height: shot.height)
+                    // Encode into the movie at capture time (before eviction) so
+                    // session.mp4 is the WHOLE run, not just the ring window.
+                    self.videoRecorder?.append(imageData: shot.imageData)
                     consecutiveFailures = 0
                 } catch {
                     consecutiveFailures += 1

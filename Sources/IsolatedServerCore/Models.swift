@@ -9,12 +9,16 @@ public struct CreateSessionRequest: Codable, Sendable {
     public let displayWidth: Int?
     public let displayHeight: Int?
     public let fallbackToMainDisplay: Bool?
+    /// What this session is for — stamped into the video metadata + footage index.
+    public let objective: String?
 
-    public init(appPath: String, displayWidth: Int? = nil, displayHeight: Int? = nil, fallbackToMainDisplay: Bool? = nil) {
+    public init(appPath: String, displayWidth: Int? = nil, displayHeight: Int? = nil,
+                fallbackToMainDisplay: Bool? = nil, objective: String? = nil) {
         self.appPath = appPath
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight
         self.fallbackToMainDisplay = fallbackToMainDisplay
+        self.objective = objective
     }
 }
 

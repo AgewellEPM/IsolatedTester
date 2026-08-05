@@ -14,9 +14,10 @@
   "mcp": {
     "command": "isolated-mcp",
     "transport": "stdio",
-    "toolCount": 29,
+    "toolCount": 32,
     "tools": [
       "create_session",
+      "set_objective",
       "attach_vm_session",
       "run_test",
       "screenshot",
@@ -24,6 +25,8 @@
       "frame_history",
       "start_recording",
       "stop_recording",
+      "session_report",
+      "trend_report",
       "ocr_frame",
       "ascii_frame",
       "seal_session",

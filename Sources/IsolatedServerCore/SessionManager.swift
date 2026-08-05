@@ -70,7 +70,8 @@ public actor SessionManager {
         appPath: String,
         displayWidth: Int = 1920,
         displayHeight: Int = 1080,
-        fallbackToMainDisplay: Bool = true
+        fallbackToMainDisplay: Bool = true,
+        objective: String? = nil
     ) async throws -> SessionResponse {
         let session = TestSession()
         let appURL = URL(fileURLWithPath: appPath)
@@ -92,6 +93,10 @@ public actor SessionManager {
         sessionLastActivity[session.id] = now
 
         startFrameHistoryIfEnabled(session)
+        // Document what this footage is for (stamped into the video metadata
+        // + the queryable index) — set AFTER frame history so the recorder/
+        // ledger exist to receive the objective marker.
+        if let objective, !objective.isEmpty { session.setObjective(objective) }
 
         return SessionResponse(
             sessionId: session.id,
@@ -119,6 +124,32 @@ public actor SessionManager {
         } catch {
             ISTLogger.console("frame history failed to start for \(session.id): \(error)", level: .verbose)
         }
+    }
+
+    /// Set/replace a live session's task objective (documented in the video
+    /// metadata and queryable index).
+    public func setObjective(sessionId: String, objective: String) throws {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        session.setObjective(objective)
+    }
+
+    /// Reviewable Markdown report of one session's footage + actions + evidence.
+    public func sessionReport(sessionId: String) throws -> [String: String] {
+        guard let md = SessionReporter.sessionReportMarkdown(id: sessionId) else {
+            throw ServerError.unknownAction("no indexed session \(sessionId) (stop it first to seal + index)")
+        }
+        let video = SessionReporter.sessionDetail(id: sessionId)?["video"] as? String ?? ""
+        return ["sessionId": sessionId, "markdown": md, "video": video]
+    }
+
+    /// Cross-session trend analysis over all recorded footage — the "learn from
+    /// failures later" surface. Returns structured findings that Peel/Jeeves can
+    /// ingest over MCP (no cross-repo coupling here).
+    public func trendReport() -> SessionReporter.Trends {
+        SessionReporter.trends()
     }
 
     /// Toggle recording ON: (re)start the ~1fps ring for a session. Resumes the

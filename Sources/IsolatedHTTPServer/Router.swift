@@ -124,6 +124,12 @@ final class Router: @unchecked Sendable {
             return await sealSession(sessionId: parts[1])
         } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "flipbook" {
             return await flipbookExport(sessionId: parts[1], body: body)
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "objective" {
+            return await setObjective(sessionId: parts[1], body: body)
+        } else if method == .GET && parts.count == 3 && parts[0] == "sessions" && parts[2] == "footage-report" {
+            return await sessionFootageReport(sessionId: parts[1])
+        } else if method == .GET && parts == ["trends"] {
+            return await trendReport()
         } else if method == .GET && parts == ["metrics"] {
             return await metrics()
         } else if method == .GET && parts == ["audit"] {
@@ -182,7 +188,8 @@ final class Router: @unchecked Sendable {
                 appPath: request.appPath,
                 displayWidth: request.displayWidth ?? 1920,
                 displayHeight: request.displayHeight ?? 1080,
-                fallbackToMainDisplay: request.fallbackToMainDisplay ?? true
+                fallbackToMainDisplay: request.fallbackToMainDisplay ?? true,
+                objective: request.objective
             )
             return jsonResponse(response, status: .created)
         } catch {
@@ -408,6 +415,24 @@ final class Router: @unchecked Sendable {
             let maxFrames = (try? JSONDecoder().decode([String: Int].self, from: body))?["maxFrames"] ?? 60
             return jsonResponse(try await sessionManager.flipbookExport(sessionId: sessionId, maxFrames: maxFrames))
         } catch { return .error(.badRequest, error.localizedDescription) }
+    }
+
+    private func setObjective(sessionId: String, body: Data) async -> HTTPResponse {
+        do {
+            let objective = (try? JSONDecoder().decode([String: String].self, from: body))?["objective"] ?? ""
+            try await sessionManager.setObjective(sessionId: sessionId, objective: objective)
+            return jsonResponse(["success": true])
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func sessionFootageReport(sessionId: String) async -> HTTPResponse {
+        do {
+            return jsonResponse(try await sessionManager.sessionReport(sessionId: sessionId))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func trendReport() async -> HTTPResponse {
+        return jsonResponse(await sessionManager.trendReport())
     }
 
     // MARK: - Other Endpoints

@@ -17,7 +17,16 @@ final class MCPToolHandlers {
                 param("appPath", "string", "Path to the .app bundle", required: true),
                 param("displayWidth", "integer", "Display width (default: 1920)"),
                 param("displayHeight", "integer", "Display height (default: 1080)"),
+                param("objective", "string", "What this session is for — stamped into the session.mp4 metadata and the queryable footage index"),
             ]),
+            tool("set_objective", "Set/replace the session's task objective — documented in the video metadata and the reviewable session index", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("objective", "string", "What this session is accomplishing", required: true),
+            ]),
+            tool("session_report", "Reviewable Markdown report of one session's footage: objective, app, action log, video path, and evidence chain head (session must be stopped/sealed first)", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
+            tool("trend_report", "Cross-session trend analysis over ALL recorded footage: session/app/action mix, unsealed/zero-action/no-video signals for reviewing failures later. Structured for Peel/Jeeves to ingest over MCP", []),
             tool("attach_vm_session", "Attach a running qemu-system-* VM to an isolated virtual display without owning or terminating the VM", [
                 param("pid", "integer", "Running QEMU process ID", required: true),
                 param("displayWidth", "integer", "Display width (default: 1280)"),
@@ -139,9 +148,26 @@ final class MCPToolHandlers {
                     appPath: args["appPath"] as? String ?? "",
                     displayWidth: args["displayWidth"] as? Int ?? 1920,
                     displayHeight: args["displayHeight"] as? Int ?? 1080,
-                    fallbackToMainDisplay: args["fallbackToMainDisplay"] as? Bool ?? true
+                    fallbackToMainDisplay: args["fallbackToMainDisplay"] as? Bool ?? true,
+                    objective: args["objective"] as? String
                 )
                 result = encode(response)
+
+            case "set_objective":
+                try await sessionManager.setObjective(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    objective: args["objective"] as? String ?? ""
+                )
+                result = "{\"success\": true}"
+
+            case "session_report":
+                let report = try await sessionManager.sessionReport(
+                    sessionId: args["sessionId"] as? String ?? ""
+                )
+                result = encode(report)
+
+            case "trend_report":
+                result = encode(await sessionManager.trendReport())
 
             case "attach_vm_session":
                 let response = try await sessionManager.attachVMSession(
