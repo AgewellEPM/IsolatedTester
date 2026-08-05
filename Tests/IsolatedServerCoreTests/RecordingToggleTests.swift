@@ -42,6 +42,14 @@ final class RecordingToggleTests: XCTestCase {
     }
 
 
+    func testStopSessionUnknownReturnsFalse() async {
+        // The MCP + HTTP stop handlers depend on this Bool to report NOT_FOUND
+        // instead of a false success. Codex P2 (2026-08-04).
+        let manager = SessionManager()
+        let existed = await manager.stopSession("does-not-exist")
+        XCTAssertFalse(existed, "stopping an unknown session must report false")
+    }
+
     func testFlipbookExportRejectsNonPositiveMaxFrames() async {
         let manager = SessionManager()
         for bad in [0, -1] {

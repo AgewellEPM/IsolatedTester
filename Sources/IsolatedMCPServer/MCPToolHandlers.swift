@@ -282,7 +282,14 @@ final class MCPToolHandlers {
                 result = encode(sessions)
 
             case "stop_session":
-                await sessionManager.stopSession(args["sessionId"] as? String ?? "")
+                let stopId = args["sessionId"] as? String ?? ""
+                let existed = await sessionManager.stopSession(stopId)
+                if !existed {
+                    // Unknown/already-stopped session is a logical error — signal
+                    // isError so idempotent cleanup callers can't mistake a miss
+                    // for a real teardown (matches HTTP's 404 path).
+                    return (encode(ErrorResponse(error: "Session not found: \(stopId)", code: "NOT_FOUND")), true)
+                }
                 result = "{\"success\": true}"
 
             case "list_displays":
