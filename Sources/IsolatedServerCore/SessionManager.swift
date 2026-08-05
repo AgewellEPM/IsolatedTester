@@ -507,14 +507,18 @@ public actor SessionManager {
     /// 404 instead of silently succeeding when the session ID is unknown.
     @discardableResult
     public func stopSession(_ sessionId: String) async -> Bool {
-        guard let session = sessions[sessionId] else { return false }
+        // Claim-and-remove BEFORE the await. `session.stop()` is async, so the
+        // await is an actor suspension point; if the id stayed in `sessions`, a
+        // concurrent stopSession(sameId) could re-enter and stop() the session
+        // twice (duplicate termination + duplicate seal/pause ledger entries).
+        // Removing first makes teardown single-shot: the racing call sees nil.
+        guard let session = sessions.removeValue(forKey: sessionId) else { return false }
         runningTests[sessionId]?.cancel()
         runningTests.removeValue(forKey: sessionId)
-        await session.stop()
-        sessions.removeValue(forKey: sessionId)
         agents.removeValue(forKey: sessionId)
         sessionCreatedAt.removeValue(forKey: sessionId)
         sessionLastActivity.removeValue(forKey: sessionId)
+        await session.stop()
         return true
     }
 
@@ -523,15 +527,19 @@ public actor SessionManager {
     public func stopAll() async {
         cleanupTask?.cancel()
         cleanupTask = nil
-        for (id, session) in sessions {
-            runningTests[id]?.cancel()
-            await session.stop()
-            agents.removeValue(forKey: id)
-        }
+        // Snapshot and clear the maps BEFORE awaiting any teardown, for the same
+        // single-shot reason as stopSession — a concurrent stopSession can't then
+        // re-stop a session this loop is already tearing down.
+        let claimed = sessions
         sessions.removeAll()
+        runningTests.values.forEach { $0.cancel() }
         runningTests.removeAll()
+        agents.removeAll()
         sessionCreatedAt.removeAll()
         sessionLastActivity.removeAll()
+        for (_, session) in claimed {
+            await session.stop()
+        }
     }
 
     /// Cancel a running test on a session.

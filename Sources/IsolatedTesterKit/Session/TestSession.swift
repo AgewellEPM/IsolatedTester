@@ -138,8 +138,13 @@ public final class TestSession: @unchecked Sendable {
         }
     }
 
-    /// End the session: quiesce recording, seal evidence, tear down.
+    /// End the session: quiesce recording, seal evidence, tear down. Idempotent
+    /// — a second call is a no-op so shutdown can't double-seal.
     public func stop() async {
+        lock.lock()
+        if stopped { lock.unlock(); return }
+        stopped = true
+        lock.unlock()
         // Await the capture loop's exit FIRST so no frame can append after the
         // seal snapshot — the seal must be the true terminal ledger entry.
         await stopFrameHistory()
@@ -248,6 +253,7 @@ public final class TestSession: @unchecked Sendable {
     private var frameHistoryTask: Task<Void, Never>?
     private var frameHistoryError: String?
     private var receipts: SessionReceipts?
+    private var stopped = false
 
     /// Continuous ~1fps capture into a bounded on-disk ring (default 300
     /// frames ≈ 5 minutes). Fails safe: five consecutive capture failures
@@ -456,10 +462,20 @@ public final class TestSession: @unchecked Sendable {
     }
 
     deinit {
-        // Sync last-resort cleanup: cancel the loop and release resources.
-        // Callers should prefer `await stop()` to also seal the evidence —
-        // deinit cannot await, so a session dropped without stop() is not sealed.
+        // Best-effort last resort for a session dropped without `await stop()`.
+        // deinit cannot await, so it can't wait for the capture loop to exit —
+        // but it cancels the loop and SYNCHRONOUSLY seals whatever frames exist,
+        // so the evidence chain is closed rather than left dangling. Guarded by
+        // `stopped` so a session already stopped via stop() is never re-sealed.
+        lock.lock()
+        let alreadyStopped = stopped
+        stopped = true
+        let ledger = receipts
+        lock.unlock()
         cancelFrameHistory()
+        if !alreadyStopped, let ledger {
+            _ = try? ledger.seal(frames: frameHistoryStore?.history(last: Int.max) ?? [])
+        }
         teardownResources()
     }
 }

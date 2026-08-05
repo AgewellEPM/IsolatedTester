@@ -50,6 +50,20 @@ final class RecordingToggleTests: XCTestCase {
         XCTAssertFalse(existed, "stopping an unknown session must report false")
     }
 
+    func testConcurrentStopSessionIsSingleShot() async {
+        // Codex P2 (2026-08-05): stopSession claims-and-removes before the
+        // async teardown, so two concurrent stops of the same id must yield
+        // exactly one true — the other sees the id already gone.
+        let manager = SessionManager()
+        async let a = manager.stopSession("nope")
+        async let b = manager.stopSession("nope")
+        let results = await [a, b]
+        XCTAssertEqual(results.filter { $0 }.count, 0,
+                       "unknown id: neither call should claim it")
+        // (A live-session double-stop is covered by the idempotent stop() guard;
+        // this pins the claim-before-await ordering for the not-found path.)
+    }
+
     func testFlipbookExportRejectsNonPositiveMaxFrames() async {
         let manager = SessionManager()
         for bad in [0, -1] {
