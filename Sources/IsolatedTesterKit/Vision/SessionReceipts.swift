@@ -51,7 +51,13 @@ public final class SessionReceipts: @unchecked Sendable {
     @discardableResult
     public func append(kind: String, detail: String, sha256: String = "",
                        atUptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Entry {
+        // The whole critical section — compute link, append in memory, AND
+        // persist — runs under one lock. Two concurrent writers (the 1fps
+        // frame task and action logging) therefore can neither interleave
+        // bytes in the JSONL nor write lines out of chain order, which would
+        // otherwise corrupt the evidence the ledger exists to guarantee.
         lock.lock()
+        defer { lock.unlock() }
         let index = entries.count
         let prevHash = entries.last?.entryHash ?? String(repeating: "0", count: 64)
         // Canonical, order-sensitive preimage — prevHash inclusion is the chain.
@@ -60,7 +66,6 @@ public final class SessionReceipts: @unchecked Sendable {
         let entry = Entry(index: index, kind: kind, detail: detail, sha256: sha256,
                           atUptime: atUptime, prevHash: prevHash, entryHash: entryHash)
         entries.append(entry)
-        lock.unlock()
 
         if let line = try? JSONEncoder().encode(entry),
            let text = String(data: line, encoding: .utf8) {
@@ -69,6 +74,8 @@ public final class SessionReceipts: @unchecked Sendable {
         return entry
     }
 
+    /// Must be called with `lock` held (see `append`) so file order matches
+    /// chain order and concurrent writers cannot interleave bytes.
     private func appendLine(_ text: String) {
         let data = Data((text + "\n").utf8)
         if let handle = try? FileHandle(forWritingTo: ledgerURL) {

@@ -54,6 +54,35 @@ final class SessionReceiptsTests: XCTestCase {
         XCTAssertEqual(firstBroken(entries), 1, "tampered entry must break the chain at its index")
     }
 
+    func testConcurrentAppendsProduceUncorruptedOrderedLedgerFile() throws {
+        // Codex P2 (2026-08-04): the frame task and action logging append
+        // concurrently; the on-disk JSONL must stay byte-intact and in chain
+        // order, or firstBrokenIndex would flag corruption it can't recover.
+        let ledger = try SessionReceipts(sessionID: "race", directory: dir)
+        let total = 400
+        DispatchQueue.concurrentPerform(iterations: total) { i in
+            ledger.append(kind: i % 2 == 0 ? "frame" : "action",
+                          detail: "n=\(i)", sha256: String(format: "%064x", i))
+        }
+        XCTAssertNil(ledger.firstBrokenIndex(), "in-memory chain must verify")
+        XCTAssertEqual(ledger.count, total)
+
+        // Re-read the persisted ledger: exactly `total` well-formed lines, each
+        // decodes, and the chain links + hashes verify in FILE order.
+        let raw = try String(contentsOf: dir.appendingPathComponent("receipts.jsonl"))
+        let lines = raw.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, total, "no line lost or interleaved on disk")
+        var expectedPrev = String(repeating: "0", count: 64)
+        for (i, line) in lines.enumerated() {
+            let entry = try JSONDecoder().decode(SessionReceipts.Entry.self, from: Data(line.utf8))
+            XCTAssertEqual(entry.index, i, "file order must equal chain order")
+            XCTAssertEqual(entry.prevHash, expectedPrev, "broken link at file line \(i)")
+            let pre = "\(entry.index)|\(entry.kind)|\(entry.detail)|\(entry.sha256)|\(String(format: "%.6f", entry.atUptime))|\(entry.prevHash)"
+            XCTAssertEqual(sha256Hex(pre), entry.entryHash, "recomputed hash mismatch at \(i)")
+            expectedPrev = entry.entryHash
+        }
+    }
+
     func testSealWritesManifestAndTerminalEntry() throws {
         let ledger = try SessionReceipts(sessionID: "s3", directory: dir)
         ledger.append(kind: "frame", detail: "ordinal=0", sha256: "aa")
