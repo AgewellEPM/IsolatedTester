@@ -188,7 +188,7 @@ struct Launch: AsyncParsableCommand {
 
         // Perform full async cleanup now that we are back in the async context.
         out("\nStopping session...")
-        session.stop()
+        await session.stop()
     }
 }
 
@@ -364,7 +364,7 @@ struct Test: AsyncParsableCommand {
         }
 
         // 8. Cleanup
-        session.stop()
+        await session.stop()
 
         // Exit with appropriate code
         if !report.success {

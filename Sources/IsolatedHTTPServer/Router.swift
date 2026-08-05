@@ -73,6 +73,7 @@ final class Router: @unchecked Sendable {
 
         // Route matching
         let parts = path.split(separator: "/").map(String.init)
+        let query = Self.parseQuery(uri)
 
         // Route matching using if-else since Swift 5.10 doesn't allow let-bindings in tuple patterns
         if method == .GET && (parts.isEmpty || parts == ["health"]) {
@@ -81,6 +82,8 @@ final class Router: @unchecked Sendable {
             return await listDisplays()
         } else if method == .GET && parts == ["permissions"] {
             return await checkPermissions()
+        } else if method == .POST && parts == ["permissions", "request"] {
+            return await requestPermissions()
         } else if method == .POST && parts == ["sessions"] {
             return await createSession(body: body)
         } else if method == .GET && parts == ["sessions"] {
@@ -107,6 +110,20 @@ final class Router: @unchecked Sendable {
             return await findElement(sessionId: parts[1], body: body)
         } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "element-action" {
             return await elementAction(sessionId: parts[1], body: body)
+        } else if method == .GET && parts.count == 3 && parts[0] == "sessions" && parts[2] == "frames" {
+            return await frameHistory(sessionId: parts[1], query: query)
+        } else if method == .GET && parts.count == 5 && parts[0] == "sessions" && parts[2] == "frames" && parts[4] == "ocr" {
+            return await ocrFrame(sessionId: parts[1], ordinal: parts[3])
+        } else if method == .GET && parts.count == 3 && parts[0] == "sessions" && parts[2] == "ascii" {
+            return await asciiFrame(sessionId: parts[1], query: query)
+        } else if method == .POST && parts.count == 4 && parts[0] == "sessions" && parts[2] == "recording" && parts[3] == "start" {
+            return await startRecording(sessionId: parts[1], body: body)
+        } else if method == .POST && parts.count == 4 && parts[0] == "sessions" && parts[2] == "recording" && parts[3] == "stop" {
+            return await stopRecording(sessionId: parts[1])
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "seal" {
+            return await sealSession(sessionId: parts[1])
+        } else if method == .POST && parts.count == 3 && parts[0] == "sessions" && parts[2] == "flipbook" {
+            return await flipbookExport(sessionId: parts[1], body: body)
         } else if method == .GET && parts == ["metrics"] {
             return await metrics()
         } else if method == .GET && parts == ["audit"] {
@@ -322,6 +339,75 @@ final class Router: @unchecked Sendable {
         } catch {
             return .error(.badRequest, error.localizedDescription)
         }
+    }
+
+    // MARK: - Vision system (headless parity with the MCP surface)
+
+    /// Parse a URL query string into a flat dictionary (last value wins).
+    private static func parseQuery(_ uri: String) -> [String: String] {
+        guard let q = uri.components(separatedBy: "?").dropFirst().first, !q.isEmpty else { return [:] }
+        var out: [String: String] = [:]
+        for pair in q.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard let key = kv.first else { continue }
+            let value = kv.count > 1 ? (kv[1].removingPercentEncoding ?? kv[1]) : ""
+            out[key] = value
+        }
+        return out
+    }
+
+    private func requestPermissions() async -> HTTPResponse {
+        return jsonResponse(await sessionManager.requestPermissions())
+    }
+
+    private func frameHistory(sessionId: String, query: [String: String]) async -> HTTPResponse {
+        do {
+            let limit = query["limit"].flatMap(Int.init) ?? 50
+            return jsonResponse(try await sessionManager.frameHistory(sessionId: sessionId, limit: limit))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func ocrFrame(sessionId: String, ordinal: String) async -> HTTPResponse {
+        guard let ord = Int(ordinal) else { return .error(.badRequest, "ordinal must be an integer") }
+        do {
+            return jsonResponse(try await sessionManager.ocrFrame(sessionId: sessionId, ordinal: ord))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func asciiFrame(sessionId: String, query: [String: String]) async -> HTTPResponse {
+        do {
+            let ordinal = query["ordinal"].flatMap(Int.init)
+            let cols = query["cols"].flatMap(Int.init) ?? 160
+            let overlay = query["overlayText"].map { $0 != "false" && $0 != "0" } ?? true
+            return jsonResponse(try await sessionManager.asciiFrame(
+                sessionId: sessionId, ordinal: ordinal, cols: cols, overlayText: overlay))
+        } catch { return .error(.badRequest, error.localizedDescription) }
+    }
+
+    private func startRecording(sessionId: String, body: Data) async -> HTTPResponse {
+        do {
+            let capacity = (try? JSONDecoder().decode([String: Int].self, from: body))?["capacity"] ?? 300
+            return jsonResponse(try await sessionManager.startRecording(sessionId: sessionId, capacity: capacity))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func stopRecording(sessionId: String) async -> HTTPResponse {
+        do {
+            return jsonResponse(try await sessionManager.stopRecording(sessionId: sessionId))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func sealSession(sessionId: String) async -> HTTPResponse {
+        do {
+            return jsonResponse(try await sessionManager.sealSession(sessionId: sessionId))
+        } catch { return .error(.notFound, error.localizedDescription) }
+    }
+
+    private func flipbookExport(sessionId: String, body: Data) async -> HTTPResponse {
+        do {
+            let maxFrames = (try? JSONDecoder().decode([String: Int].self, from: body))?["maxFrames"] ?? 60
+            return jsonResponse(try await sessionManager.flipbookExport(sessionId: sessionId, maxFrames: maxFrames))
+        } catch { return .error(.badRequest, error.localizedDescription) }
     }
 
     // MARK: - Other Endpoints

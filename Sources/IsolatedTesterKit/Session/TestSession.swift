@@ -138,18 +138,22 @@ public final class TestSession: @unchecked Sendable {
         }
     }
 
-    /// End the session: terminate app, destroy display.
-    public func stop() {
-        stopFrameHistory()
-        // Seal the evidence before teardown: a terminal chain entry + a
-        // manifest of the ordered frames still on disk. Frames are retained
-        // (not purged) so the seal's referenced files exist for verification.
+    /// End the session: quiesce recording, seal evidence, tear down.
+    public func stop() async {
+        // Await the capture loop's exit FIRST so no frame can append after the
+        // seal snapshot — the seal must be the true terminal ledger entry.
+        await stopFrameHistory()
         if let ledger = receipts {
             _ = try? ledger.seal(frames: frameHistoryStore?.history(last: Int.max) ?? [])
         }
+        teardownResources()
+    }
+
+    /// Terminate the owned app and destroy the display. Shared by stop() and
+    /// deinit; does not touch the (already-canceled) capture loop.
+    private func teardownResources() {
         if let app, app.ownsProcess {
-            let pid = app.pid
-            launcher.terminateApp(pid: pid)
+            launcher.terminateApp(pid: app.pid)
         }
         if let displayID = display?.displayID {
             displayManager.destroyDisplay(id: displayID)
@@ -326,14 +330,28 @@ public final class TestSession: @unchecked Sendable {
     }
 
     /// Pause capture. The ring and evidence chain are retained so a later
-    /// startFrameHistory() resumes the same recording.
-    public func stopFrameHistory() {
+    /// startFrameHistory() resumes the same recording. Async so callers that
+    /// need a quiescent ledger (e.g. seal on teardown) can await the in-flight
+    /// capture cycle finishing before they snapshot — otherwise a frame could
+    /// append AFTER the seal and leave the manifest missing its final frames.
+    public func stopFrameHistory() async {
         lock.lock()
         let task = frameHistoryTask
         frameHistoryTask = nil
         let ledger = receipts
         lock.unlock()
         if task != nil { ledger?.append(kind: "recording-paused", detail: "") }
+        task?.cancel()
+        await task?.value   // wait for the loop to actually exit before returning
+    }
+
+    /// Synchronous fire-and-forget cancel for non-async teardown paths (deinit).
+    /// Prefer the async stopFrameHistory() when the ledger must be quiescent.
+    private func cancelFrameHistory() {
+        lock.lock()
+        let task = frameHistoryTask
+        frameHistoryTask = nil
+        lock.unlock()
         task?.cancel()
     }
 
@@ -438,7 +456,11 @@ public final class TestSession: @unchecked Sendable {
     }
 
     deinit {
-        stop()
+        // Sync last-resort cleanup: cancel the loop and release resources.
+        // Callers should prefer `await stop()` to also seal the evidence —
+        // deinit cannot await, so a session dropped without stop() is not sealed.
+        cancelFrameHistory()
+        teardownResources()
     }
 }
 

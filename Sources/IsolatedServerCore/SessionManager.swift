@@ -42,7 +42,7 @@ public actor SessionManager {
         }
     }
 
-    private func cleanupStaleSessions() {
+    private func cleanupStaleSessions() async {
         let now = Date()
         var toRemove: [String] = []
         for (id, _) in sessions {
@@ -54,7 +54,7 @@ public actor SessionManager {
         }
         for id in toRemove {
             ISTLogger.console("Session \(id) expired (idle or max age exceeded)", level: .verbose)
-            _ = stopSession(id)
+            _ = await stopSession(id)
         }
     }
 
@@ -134,12 +134,12 @@ public actor SessionManager {
 
     /// Toggle recording OFF: pause capture. The ring and evidence chain are
     /// retained (a pause marker is logged) so recording can resume later.
-    public func stopRecording(sessionId: String) throws -> FrameHistoryResponse {
+    public func stopRecording(sessionId: String) async throws -> FrameHistoryResponse {
         guard let session = sessions[sessionId] else {
             throw ServerError.sessionNotFound(sessionId)
         }
         sessionLastActivity[sessionId] = Date()
-        session.stopFrameHistory()
+        await session.stopFrameHistory()
         return try frameHistory(sessionId: sessionId, limit: 1)
     }
 
@@ -506,11 +506,11 @@ public actor SessionManager {
     /// Bug 6 fix: changed return type from Void to Bool so HTTP callers can return
     /// 404 instead of silently succeeding when the session ID is unknown.
     @discardableResult
-    public func stopSession(_ sessionId: String) -> Bool {
-        guard sessions[sessionId] != nil else { return false }
+    public func stopSession(_ sessionId: String) async -> Bool {
+        guard let session = sessions[sessionId] else { return false }
         runningTests[sessionId]?.cancel()
         runningTests.removeValue(forKey: sessionId)
-        sessions[sessionId]?.stop()
+        await session.stop()
         sessions.removeValue(forKey: sessionId)
         agents.removeValue(forKey: sessionId)
         sessionCreatedAt.removeValue(forKey: sessionId)
@@ -520,12 +520,12 @@ public actor SessionManager {
 
     /// Stop every active session. Called during server shutdown so no launched
     /// apps are orphaned after the server process exits.
-    public func stopAll() {
+    public func stopAll() async {
         cleanupTask?.cancel()
         cleanupTask = nil
         for (id, session) in sessions {
             runningTests[id]?.cancel()
-            session.stop()
+            await session.stop()
             agents.removeValue(forKey: id)
         }
         sessions.removeAll()
