@@ -252,25 +252,40 @@ public final class TestSession: @unchecked Sendable {
     public func startFrameHistory(intervalSeconds: Double = 1.0, capacity: Int = 300) throws {
         lock.lock()
         let alreadyRunning = frameHistoryTask != nil
+        let existingStore = frameStore
+        let existingLedger = receipts
         lock.unlock()
         guard !alreadyRunning else { return }
 
-        let sessionDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".isolated-tester/sessions/\(id)", isDirectory: true)
-        let store = try FrameStore(directory: sessionDir.appendingPathComponent("frames", isDirectory: true),
+        let store: FrameStore
+        let ledger: SessionReceipts
+        if let existingStore, let existingLedger {
+            // Resume: keep the same ring + evidence chain so pause/resume is a
+            // continuous, gap-marked recording rather than a fresh ledger that
+            // would clobber the chain.
+            store = existingStore
+            ledger = existingLedger
+            ledger.append(kind: "recording-resumed", detail: "capacity=\(store.capacity)")
+        } else {
+            let sessionDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".isolated-tester/sessions/\(id)", isDirectory: true)
+            store = try FrameStore(directory: sessionDir.appendingPathComponent("frames", isDirectory: true),
                                    capacity: capacity)
-        let ledger = try SessionReceipts(sessionID: id, directory: sessionDir)
-        store.onRecord = { frame in
-            ledger.append(kind: "frame", detail: "ordinal=\(frame.ordinal)",
-                          sha256: frame.sha256, atUptime: frame.capturedAtUptime)
-        }
-        store.onEvict = { frame in
-            ledger.append(kind: "eviction", detail: "ordinal=\(frame.ordinal)", sha256: frame.sha256)
+            ledger = try SessionReceipts(sessionID: id, directory: sessionDir)
+            store.onRecord = { frame in
+                ledger.append(kind: "frame", detail: "ordinal=\(frame.ordinal)",
+                              sha256: frame.sha256, atUptime: frame.capturedAtUptime)
+            }
+            store.onEvict = { frame in
+                ledger.append(kind: "eviction", detail: "ordinal=\(frame.ordinal)", sha256: frame.sha256)
+            }
+            lock.lock()
+            frameStore = store
+            receipts = ledger
+            lock.unlock()
         }
 
         lock.lock()
-        frameStore = store
-        receipts = ledger
         frameHistoryError = nil
         lock.unlock()
 
@@ -310,11 +325,15 @@ public final class TestSession: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Pause capture. The ring and evidence chain are retained so a later
+    /// startFrameHistory() resumes the same recording.
     public func stopFrameHistory() {
         lock.lock()
         let task = frameHistoryTask
         frameHistoryTask = nil
+        let ledger = receipts
         lock.unlock()
+        if task != nil { ledger?.append(kind: "recording-paused", detail: "") }
         task?.cancel()
     }
 

@@ -121,6 +121,28 @@ public actor SessionManager {
         }
     }
 
+    /// Toggle recording ON: (re)start the ~1fps ring for a session. Resumes the
+    /// existing ring + evidence chain if it was paused; starts fresh otherwise.
+    public func startRecording(sessionId: String, capacity: Int = 300) throws -> FrameHistoryResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        try session.startFrameHistory(intervalSeconds: 1.0, capacity: capacity)
+        return try frameHistory(sessionId: sessionId, limit: 1)
+    }
+
+    /// Toggle recording OFF: pause capture. The ring and evidence chain are
+    /// retained (a pause marker is logged) so recording can resume later.
+    public func stopRecording(sessionId: String) throws -> FrameHistoryResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        session.stopFrameHistory()
+        return try frameHistory(sessionId: sessionId, limit: 1)
+    }
+
     /// Rolling frame history of a session (newest last).
     public func frameHistory(sessionId: String, limit: Int = 50) throws -> FrameHistoryResponse {
         guard let session = sessions[sessionId] else {

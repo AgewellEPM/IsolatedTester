@@ -44,6 +44,13 @@ final class MCPToolHandlers {
                 param("sessionId", "string", "Session ID", required: true),
                 param("limit", "integer", "Max frames to return (default 50)"),
             ]),
+            tool("start_recording", "Turn the session's ~1fps screen recording ON. Resumes the existing frame ring + evidence chain if it was paused, otherwise starts fresh", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("capacity", "integer", "Ring size in frames, 1-10000 (default 300 ≈ 5 min); ignored when resuming"),
+            ]),
+            tool("stop_recording", "Turn the session's screen recording OFF (pause). The frame ring and evidence chain are retained with a pause marker so recording can be resumed later", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
             tool("ocr_frame", "Frame-bound OCR on one history frame: verifies the stored sha256 before recognizing, returns text observations with confidence and normalized bounds", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("ordinal", "integer", "Frame ordinal from frame_history", required: true),
@@ -185,6 +192,19 @@ final class MCPToolHandlers {
                 let response = try await sessionManager.frameHistory(
                     sessionId: args["sessionId"] as? String ?? "",
                     limit: args["limit"] as? Int ?? 50
+                )
+                result = encode(response)
+
+            case "start_recording":
+                let response = try await sessionManager.startRecording(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    capacity: args["capacity"] as? Int ?? 300
+                )
+                result = encode(response)
+
+            case "stop_recording":
+                let response = try await sessionManager.stopRecording(
+                    sessionId: args["sessionId"] as? String ?? ""
                 )
                 result = encode(response)
 
