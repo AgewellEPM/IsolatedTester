@@ -172,6 +172,12 @@ public actor SessionManager {
     /// ~/.kist/visual-flipbooks/<session>/ with an index.json. Makes the
     /// console's long-standing "1fps-to-300-frame flipbook" prompt real.
     public func flipbookExport(sessionId: String, maxFrames: Int = 60) throws -> FlipbookResponse {
+        // Reject non-positive caps up front: a 0/negative maxFrames would make
+        // the subsample stride zero/negative and silently produce an empty
+        // export instead of an honest error.
+        guard (1...1000).contains(maxFrames) else {
+            throw ServerError.unknownAction("maxFrames must be 1...1000, got \(maxFrames)")
+        }
         guard let session = sessions[sessionId] else {
             throw ServerError.sessionNotFound(sessionId)
         }
@@ -418,12 +424,14 @@ public actor SessionManager {
 
     /// Export a PNG frame to an owner-private local file for another local MCP
     /// vision server. This is observation only; it does not actuate the guest.
-    public func sessionFrame(sessionId: String) async throws -> SessionFrameResponse {
+    public func sessionFrame(sessionId: String, format: String = "png") async throws -> SessionFrameResponse {
         guard let session = sessions[sessionId] else {
             throw ServerError.sessionNotFound(sessionId)
         }
         sessionLastActivity[sessionId] = Date()
-        let result = try await session.screenshot(format: .png)
+        // Honor the requested format (was accepted-but-ignored) so png/jpeg is real.
+        let imageFormat: ScreenCapture.ImageFormat = format.lowercased() == "jpeg" ? .jpeg : .png
+        let result = try await session.screenshot(format: imageFormat)
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".isolated-tester/captures", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -432,7 +440,8 @@ public actor SessionManager {
             attributes: [.posixPermissions: 0o700]
         )
         _ = chmod(directory.path, 0o700)
-        let url = directory.appendingPathComponent("\(sessionId)-\(UUID().uuidString.lowercased()).png")
+        let ext = imageFormat == .jpeg ? "jpg" : "png"
+        let url = directory.appendingPathComponent("\(sessionId)-\(UUID().uuidString.lowercased()).\(ext)")
         try result.imageData.write(to: url, options: .atomic)
         _ = chmod(url.path, 0o600)
         return SessionFrameResponse(
@@ -440,7 +449,7 @@ public actor SessionManager {
             path: url.path,
             width: result.width,
             height: result.height,
-            format: "png",
+            format: imageFormat.rawValue,
             sizeKB: result.imageData.count / 1024
         )
     }

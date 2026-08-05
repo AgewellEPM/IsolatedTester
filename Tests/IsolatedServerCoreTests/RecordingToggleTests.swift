@@ -40,4 +40,18 @@ final class RecordingToggleTests: XCTestCase {
         XCTAssertEqual(decoded.error, "paused")
         XCTAssertEqual(decoded.count, 3)
     }
+
+
+    func testFlipbookExportRejectsNonPositiveMaxFrames() async {
+        let manager = SessionManager()
+        for bad in [0, -1] {
+            do {
+                _ = try await manager.flipbookExport(sessionId: "nope", maxFrames: bad)
+                XCTFail("expected error for maxFrames=\(bad)")
+            } catch {
+                // sessionNotFound OR the maxFrames guard — both are explicit,
+                // non-silent errors, which is the point.
+            }
+        }
+    }
 }

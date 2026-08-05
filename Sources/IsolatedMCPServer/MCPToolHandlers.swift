@@ -33,7 +33,7 @@ final class MCPToolHandlers {
                 param("model", "string", "Model name override"),
                 param("maxSteps", "integer", "Maximum test steps (default: 25)"),
             ]),
-            tool("screenshot", "Export the current screen state to an owner-private local image file; returns path metadata, never base64 image bytes", [
+            tool("screenshot", "Alias of session_frame: export the current screen to an owner-private local image FILE and return path metadata (never base64 bytes). The format arg (png/jpeg) is honored", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("format", "string", "Image format: png or jpeg"),
             ]),
@@ -176,15 +176,13 @@ final class MCPToolHandlers {
                 )
                 result = encode(response)
 
-            case "screenshot":
+            case "screenshot", "session_frame":
+                // screenshot is a documented alias of session_frame: both export
+                // an owner-private image FILE and return path metadata (never
+                // base64 bytes). The format arg (png/jpeg) is now honored.
                 let response = try await sessionManager.sessionFrame(
-                    sessionId: args["sessionId"] as? String ?? ""
-                )
-                result = encode(response)
-
-            case "session_frame":
-                let response = try await sessionManager.sessionFrame(
-                    sessionId: args["sessionId"] as? String ?? ""
+                    sessionId: args["sessionId"] as? String ?? "",
+                    format: args["format"] as? String ?? "png"
                 )
                 result = encode(response)
 
