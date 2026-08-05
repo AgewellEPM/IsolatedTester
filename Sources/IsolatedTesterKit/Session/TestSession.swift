@@ -30,6 +30,9 @@ public final class TestSession: @unchecked Sendable {
         public let isRunning: Bool
         public let actionCount: Int
         public let startedAt: Date
+        /// False when the app's windows never landed on the isolated display —
+        /// the session is then NOT isolated and input targets a mis-placed app.
+        public let windowsPlaced: Bool
     }
 
     public init(id: String) {
@@ -55,7 +58,7 @@ public final class TestSession: @unchecked Sendable {
         // 1. Try to create isolated virtual display
         let managedDisplay: VirtualDisplayManager.ManagedDisplay
         do {
-            managedDisplay = try displayManager.createDisplay(config: displayConfig)
+            managedDisplay = try await displayManager.createDisplay(config: displayConfig)
             ISTLogger.session.info("Created virtual display: \(managedDisplay.displayID)")
         } catch {
             if fallbackToMainDisplay {
@@ -108,9 +111,37 @@ public final class TestSession: @unchecked Sendable {
         return state
     }
 
+    /// Create an isolated display and move an existing QEMU window onto it.
+    /// The VM remains owned by Perslis; stopping this session never terminates it.
+    public func attachVM(
+        pid: pid_t,
+        displayConfig: VirtualDisplayManager.DisplayConfig = .init()
+    ) async throws -> SessionState {
+        let managedDisplay = try await displayManager.createDisplay(config: displayConfig)
+        self.display = managedDisplay
+        do {
+            let attachedApp = try await launcher.attachExistingVM(
+                pid: pid,
+                displayID: managedDisplay.displayID
+            )
+            self.app = attachedApp
+            self.input = InputController(
+                displayID: managedDisplay.displayID,
+                targetPID: attachedApp.pid
+            )
+            try await Task.sleep(nanoseconds: 500_000_000)
+            return state
+        } catch {
+            displayManager.destroyDisplay(id: managedDisplay.displayID)
+            self.display = nil
+            throw error
+        }
+    }
+
     /// End the session: terminate app, destroy display.
     public func stop() {
-        if let pid = app?.pid {
+        if let app, app.ownsProcess {
+            let pid = app.pid
             launcher.terminateApp(pid: pid)
         }
         if let displayID = display?.displayID {
@@ -195,8 +226,32 @@ public final class TestSession: @unchecked Sendable {
             appPID: app?.pid,
             isRunning: app.map { launcher.isRunning(pid: $0.pid) } ?? false,
             actionCount: actionLog.count,
-            startedAt: app?.launchedAt ?? Date()
+            startedAt: app?.launchedAt ?? Date(),
+            windowsPlaced: app?.windowsPlaced ?? false
         )
+    }
+
+    /// Self-heal: if the app's windows never landed on the isolated display at
+    /// launch (first window appeared late), try the move again before acting.
+    public func ensurePlaced() async -> Bool {
+        guard let currentApp = app else { return false }
+        if currentApp.windowsPlaced { return true }
+        guard let displayID = display?.displayID else { return false }
+        let placed = await launcher.retryPlacement(pid: currentApp.pid, displayID: displayID)
+        if placed {
+            setApp(AppLauncher.LaunchedApp(
+                pid: currentApp.pid, bundleID: currentApp.bundleID, appURL: currentApp.appURL,
+                displayID: currentApp.displayID, launchedAt: currentApp.launchedAt,
+                ownsProcess: currentApp.ownsProcess, windowsPlaced: true
+            ))
+        }
+        return placed
+    }
+
+    private func setApp(_ updated: AppLauncher.LaunchedApp) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.app = updated
     }
 
     /// Get the full action log.

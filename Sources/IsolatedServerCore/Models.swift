@@ -78,12 +78,17 @@ public struct SessionResponse: Codable, Sendable {
     public let displayID: UInt32
     public let appPID: Int32
     public let isRunning: Bool
+    /// False = the app's windows never landed on the isolated display; the
+    /// session is NOT isolated. Surfaced so callers stop trusting a broken one.
+    public let windowsPlaced: Bool
 
-    public init(sessionId: String, displayID: UInt32, appPID: Int32, isRunning: Bool) {
+    public init(sessionId: String, displayID: UInt32, appPID: Int32, isRunning: Bool,
+                windowsPlaced: Bool = true) {
         self.sessionId = sessionId
         self.displayID = displayID
         self.appPID = appPID
         self.isRunning = isRunning
+        self.windowsPlaced = windowsPlaced
     }
 }
 
@@ -133,6 +138,27 @@ public struct ScreenshotResponse: Codable, Sendable {
         self.height = height
         self.format = format
         self.base64Data = base64Data
+        self.sizeKB = sizeKB
+    }
+}
+
+/// File-backed frame metadata for MCP clients. Keeping image bytes out of the
+/// JSON-RPC response avoids output truncation while preserving a narrow,
+/// owner-private handoff to local vision tools.
+public struct SessionFrameResponse: Codable, Sendable {
+    public let sessionId: String
+    public let path: String
+    public let width: Int
+    public let height: Int
+    public let format: String
+    public let sizeKB: Int
+
+    public init(sessionId: String, path: String, width: Int, height: Int, format: String, sizeKB: Int) {
+        self.sessionId = sessionId
+        self.path = path
+        self.width = width
+        self.height = height
+        self.format = format
         self.sizeKB = sizeKB
     }
 }

@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 import Foundation
 
 /// Simulates mouse and keyboard input targeted at a specific display or process.
@@ -30,7 +31,7 @@ public final class InputController: @unchecked Sendable {
             throw InputError.eventCreationFailed("mouseMove")
         }
 
-        postEvent(event)
+        try postEvent(event)
     }
 
     /// Click at a position on the virtual display.
@@ -61,9 +62,9 @@ public final class InputController: @unchecked Sendable {
         downEvent.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
         upEvent.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
 
-        postEvent(downEvent)
+        try postEvent(downEvent)
         usleep(50_000) // 50ms between down/up
-        postEvent(upEvent)
+        try postEvent(upEvent)
     }
 
     /// Double-click at a position.
@@ -86,7 +87,7 @@ public final class InputController: @unchecked Sendable {
             throw InputError.eventCreationFailed("scroll")
         }
 
-        postEvent(event)
+        try postEvent(event)
     }
 
     /// Drag from one point to another.
@@ -103,7 +104,7 @@ public final class InputController: @unchecked Sendable {
         ) else {
             throw InputError.eventCreationFailed("drag down")
         }
-        postEvent(downEvent)
+        try postEvent(downEvent)
 
         // Interpolate movement
         for i in 1...steps {
@@ -120,7 +121,7 @@ public final class InputController: @unchecked Sendable {
                 mouseButton: .left
             ) else { continue }
 
-            postEvent(dragEvent)
+            try? postEvent(dragEvent)
             usleep(10_000) // 10ms per step
         }
 
@@ -133,7 +134,7 @@ public final class InputController: @unchecked Sendable {
         ) else {
             throw InputError.eventCreationFailed("drag up")
         }
-        postEvent(upEvent)
+        try postEvent(upEvent)
     }
 
     // MARK: - Keyboard Actions
@@ -147,25 +148,40 @@ public final class InputController: @unchecked Sendable {
 
             var unicodeChar = Array(String(char).utf16)
             event.keyboardSetUnicodeString(stringLength: unicodeChar.count, unicodeString: &unicodeChar)
-            postEvent(event)
+            try postEvent(event)
 
             guard let upEvent = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: false) else {
                 throw InputError.eventCreationFailed("keyUp")
             }
             upEvent.keyboardSetUnicodeString(stringLength: unicodeChar.count, unicodeString: &unicodeChar)
-            postEvent(upEvent)
+            try postEvent(upEvent)
 
             usleep(delayPerChar)
         }
     }
 
     /// Press a specific key with optional modifiers.
+    /// Modifier shortcuts get REAL modifier key down/up events around the main
+    /// key: flags-only shortcuts via postToPid are dropped by many apps
+    /// (Safari cmd+L was the observed casualty) — physical modifier events make
+    /// the chord register like actual typing.
     public func keyPress(_ keyCode: CGKeyCode, modifiers: CGEventFlags = []) throws {
+        let modifierKeys = Self.physicalModifierKeys(for: modifiers)
+
+        for code in modifierKeys {
+            guard let ev = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: true) else {
+                throw InputError.eventCreationFailed("modifier down")
+            }
+            ev.flags = modifiers
+            try postEvent(ev)
+            usleep(20_000)
+        }
+
         guard let downEvent = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: true) else {
             throw InputError.eventCreationFailed("keyPress down")
         }
         downEvent.flags = modifiers
-        postEvent(downEvent)
+        try postEvent(downEvent)
 
         usleep(50_000)
 
@@ -173,7 +189,26 @@ public final class InputController: @unchecked Sendable {
             throw InputError.eventCreationFailed("keyPress up")
         }
         upEvent.flags = modifiers
-        postEvent(upEvent)
+        try postEvent(upEvent)
+
+        for code in modifierKeys.reversed() {
+            guard let ev = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: false) else {
+                throw InputError.eventCreationFailed("modifier up")
+            }
+            try postEvent(ev)
+            usleep(20_000)
+        }
+    }
+
+    /// Physical key codes for the modifier keys present in a flag set, in
+    /// press order (cmd, shift, option, control).
+    public static func physicalModifierKeys(for flags: CGEventFlags) -> [CGKeyCode] {
+        var keys: [CGKeyCode] = []
+        if flags.contains(.maskCommand) { keys.append(0x37) }
+        if flags.contains(.maskShift) { keys.append(0x38) }
+        if flags.contains(.maskAlternate) { keys.append(0x3A) }
+        if flags.contains(.maskControl) { keys.append(0x3B) }
+        return keys
     }
 
     /// Common key shortcuts.
@@ -193,8 +228,13 @@ public final class InputController: @unchecked Sendable {
 
     // MARK: - Event Posting
 
-    private func postEvent(_ event: CGEvent) {
+    private func postEvent(_ event: CGEvent) throws {
         if let pid = targetPID {
+            // Fail loudly when the target died — a "successful" post to a dead
+            // process is how input silently vanished while reporting success.
+            guard kill(pid, 0) == 0 else {
+                throw InputError.targetNotFound(pid)
+            }
             event.postToPid(pid)
         } else {
             event.post(tap: .cghidEventTap)

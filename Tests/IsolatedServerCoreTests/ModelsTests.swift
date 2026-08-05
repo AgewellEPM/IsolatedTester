@@ -98,6 +98,17 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(decoded.base64Data, "abc123")
     }
 
+    func testSessionFrameResponseCodable() throws {
+        let response = SessionFrameResponse(
+            sessionId: "abc", path: "/tmp/frame.png", width: 1280, height: 960,
+            format: "png", sizeKB: 128)
+        let data = try encoder.encode(response)
+        let decoded = try decoder.decode(SessionFrameResponse.self, from: data)
+        XCTAssertEqual(decoded.sessionId, "abc")
+        XCTAssertEqual(decoded.path, "/tmp/frame.png")
+        XCTAssertEqual(decoded.format, "png")
+    }
+
     func testDisplayInfoResponseCodable() throws {
         let response = DisplayInfoResponse(displayID: 42, width: 3440, height: 1440, isMain: true)
         let data = try encoder.encode(response)
@@ -178,5 +189,22 @@ final class ModelsTests: XCTestCase {
         let decoded = try decoder.decode(ElementActionRequest.self, from: data)
         XCTAssertEqual(decoded.x, 100)
         XCTAssertEqual(decoded.action, "AXPress")
+    }
+
+
+    // MARK: - 2026-08-04 regression pins (windowsPlaced surfaced per response)
+
+    func testSessionResponse_windowsPlacedRoundTrip() throws {
+        let response = SessionResponse(sessionId: "abc", displayID: 7, appPID: 42,
+                                       isRunning: true, windowsPlaced: false)
+        let data = try encoder.encode(response)
+        let decoded = try decoder.decode(SessionResponse.self, from: data)
+        XCTAssertFalse(decoded.windowsPlaced,
+                       "an unplaced (non-isolated) session must say so in the response")
+    }
+
+    func testSessionResponse_windowsPlacedDefaultsTrue() throws {
+        let response = SessionResponse(sessionId: "abc", displayID: 7, appPID: 42, isRunning: true)
+        XCTAssertTrue(response.windowsPlaced)
     }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ObjectiveC
@@ -45,7 +46,11 @@ public final class VirtualDisplayManager: @unchecked Sendable {
 
     /// Creates a virtual display using CGVirtualDisplay (private API via ObjC runtime).
     /// This creates a real isolated display that doesn't interfere with the user's screens.
+    @MainActor
     public func createDisplay(config: DisplayConfig = .init()) throws -> ManagedDisplay {
+        // A bare CLI has no AppKit connection to WindowServer. Establish it on
+        // the main actor before asking CoreGraphics to publish a display.
+        _ = NSApplication.shared
         // Check if CGVirtualDisplay is available at runtime
         guard let descriptorClass = NSClassFromString("CGVirtualDisplayDescriptor"),
               let displayClass = NSClassFromString("CGVirtualDisplay"),
@@ -66,23 +71,30 @@ public final class VirtualDisplayManager: @unchecked Sendable {
         }
         let descriptor = descriptorType.init()
 
-        // Set properties via KVC (since we don't have headers)
+        // Match the descriptor contract used by Chromium's macOS virtual-display
+        // test host. Recent WindowServer builds reject underspecified descriptors.
         descriptor.setValue(config.name, forKey: "name")
         descriptor.setValue(config.width, forKey: "maxPixelsWide")
         descriptor.setValue(config.height, forKey: "maxPixelsHigh")
-        // Fixed 27" physical size — critical: do NOT compute from resolution
-        // This prevents WindowServer from rejecting the display due to unrealistic pixel density
-        descriptor.setValue(CGSize(width: 597, height: 336), forKey: "sizeInMillimeters")
-        descriptor.setValue(UInt32(0xF0F0), forKey: "vendorID")
-        descriptor.setValue(UInt32(0x0001), forKey: "productID")
-        descriptor.setValue(arc4random(), forKey: "serialNum")
+        descriptor.setValue(
+            CGSize(
+                width: 25.4 * Double(config.width) / Double(config.ppi),
+                height: 25.4 * Double(config.height) / Double(config.ppi)),
+            forKey: "sizeInMillimeters")
+        descriptor.setValue(CGPoint(x: 0.3125, y: 0.3291), forKey: "whitePoint")
+        descriptor.setValue(CGPoint(x: 0.1494, y: 0.0557), forKey: "bluePrimary")
+        descriptor.setValue(CGPoint(x: 0.2559, y: 0.6983), forKey: "greenPrimary")
+        descriptor.setValue(CGPoint(x: 0.6797, y: 0.3203), forKey: "redPrimary")
+        let serial = arc4random()
+        descriptor.setValue(UInt32(505), forKey: "vendorID")
+        descriptor.setValue(UInt32(0), forKey: "productID")
+        descriptor.setValue(serial, forKey: "serialNum")
+        descriptor.setValue(serial, forKey: "serialNumber")
 
-        // Set dispatch queue via selector (the property is named dispatchQueue but setter is setDispatchQueue:)
+        // The descriptor contract exposes `queue`; using setDispatchQueue: leaves
+        // that property nil on current macOS even though the selector exists.
         let queue = DispatchQueue(label: "com.isolatedtester.virtualdisplay")
-        let setQueueSel = NSSelectorFromString("setDispatchQueue:")
-        if descriptor.responds(to: setQueueSel) {
-            descriptor.perform(setQueueSel, with: queue)
-        }
+        descriptor.setValue(queue, forKey: "queue")
 
         // Create the virtual display via alloc + initWithDescriptor:
         // IMPORTANT: must use alloc/init pattern, NOT init() then perform(initSel)
@@ -93,9 +105,7 @@ public final class VirtualDisplayManager: @unchecked Sendable {
         guard let allocated = (displayClass as AnyObject).perform(allocSel)?.takeUnretainedValue(),
               let initialized = allocated.perform(initSel, with: descriptor)?.takeRetainedValue() as? NSObject else {
             throw DisplayError.creationFailed(
-                "CGVirtualDisplay initWithDescriptor: returned nil. " +
-                "This usually means the com.apple.VirtualDisplay entitlement is missing. " +
-                "For development, use startOnMainDisplay() or add the entitlement to your app."
+                "CGVirtualDisplay initWithDescriptor: returned nil; WindowServer rejected the virtual-display descriptor."
             )
         }
 
@@ -112,6 +122,9 @@ public final class VirtualDisplayManager: @unchecked Sendable {
         // Properties are readonly, so KVC won't work — must use the proper init selector.
         let modeInitSel = NSSelectorFromString("initWithWidth:height:refreshRate:")
         let modeAllocSel = NSSelectorFromString("alloc")
+        let hiDPI = config.ppi > 100
+        let modeWidth = hiDPI ? config.width / 2 : config.width
+        let modeHeight = hiDPI ? config.height / 2 : config.height
 
         // NSInvocation is not available in Swift, so use the KVC-settable init() as fallback
         // and set via the constructor if available. For CGVirtualDisplayMode, the init args
@@ -122,7 +135,7 @@ public final class VirtualDisplayManager: @unchecked Sendable {
             // Use objc_msgSend for primitive parameters that perform() can't handle
             typealias ModeInitFn = @convention(c) (AnyObject, Selector, Int, Int, Double) -> AnyObject?
             let fn = unsafeBitCast(class_getMethodImplementation(modeClass, modeInitSel), to: ModeInitFn.self)
-            if let result = fn(am, modeInitSel, config.width, config.height, 60.0) as? NSObject {
+            if let result = fn(am, modeInitSel, modeWidth, modeHeight, 60.0) as? NSObject {
                 mode = result
             } else {
                 // Fallback: use default init and try KVC — safe cast to avoid crash
@@ -131,8 +144,8 @@ public final class VirtualDisplayManager: @unchecked Sendable {
                     throw DisplayError.creationFailed("CGVirtualDisplayMode is not an NSObject subclass")
                 }
                 mode = modeType.init()
-                mode.setValue(config.width, forKey: "width")
-                mode.setValue(config.height, forKey: "height")
+                mode.setValue(modeWidth, forKey: "width")
+                mode.setValue(modeHeight, forKey: "height")
                 mode.setValue(60.0, forKey: "refreshRate")
             }
         } else {
@@ -141,8 +154,8 @@ public final class VirtualDisplayManager: @unchecked Sendable {
                 throw DisplayError.creationFailed("CGVirtualDisplayMode is not an NSObject subclass")
             }
             mode = modeType.init()
-            mode.setValue(config.width, forKey: "width")
-            mode.setValue(config.height, forKey: "height")
+            mode.setValue(modeWidth, forKey: "width")
+            mode.setValue(modeHeight, forKey: "height")
             mode.setValue(60.0, forKey: "refreshRate")
         }
 
@@ -151,7 +164,8 @@ public final class VirtualDisplayManager: @unchecked Sendable {
             throw DisplayError.creationFailed("CGVirtualDisplaySettings is not an NSObject subclass")
         }
         let settings = settingsType.init()
-        settings.setValue(UInt32(config.ppi > 100 ? 2 : 1), forKey: "hiDPI")
+        settings.setValue(hiDPI, forKey: "hiDPI")
+        settings.setValue(0, forKey: "rotation")
         settings.setValue([mode], forKey: "modes")
 
         // Apply settings to display

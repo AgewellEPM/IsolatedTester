@@ -63,4 +63,10 @@ final class TestSessionTests: XCTestCase {
         let state = session.state
         XCTAssertEqual(state.sessionID, "abc12345")
     }
+
+    func testVMAttachmentExecutablePolicyIsNarrow() {
+        XCTAssertFalse(AppLauncher.isAllowedVMExecutable(path: "/bin/bash"))
+        XCTAssertFalse(AppLauncher.isAllowedVMExecutable(path: "/usr/bin/open"))
+        XCTAssertNil(AppLauncher.executablePath(for: 0))
+    }
 }

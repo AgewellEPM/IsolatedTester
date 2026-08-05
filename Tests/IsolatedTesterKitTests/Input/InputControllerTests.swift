@@ -74,4 +74,40 @@ final class InputControllerTests: XCTestCase {
         let controller = InputController(displayID: CGMainDisplayID())
         XCTAssertNotNil(controller)
     }
+
+
+    // MARK: - 2026-08-04 regression pins (input honesty + placement)
+
+    func testPhysicalModifierKeys_orderAndCodes() {
+        // cmd, shift, option, control — press order matters for chords.
+        let keys = InputController.physicalModifierKeys(
+            for: [.maskCommand, .maskShift, .maskAlternate, .maskControl])
+        XCTAssertEqual(keys, [0x37, 0x38, 0x3A, 0x3B])
+    }
+
+    func testPhysicalModifierKeys_singleAndEmpty() {
+        XCTAssertEqual(InputController.physicalModifierKeys(for: [.maskCommand]), [0x37])
+        XCTAssertEqual(InputController.physicalModifierKeys(for: []), [])
+    }
+
+    func testTypeText_deadTargetThrowsTargetNotFound() {
+        // A "successful" post to a dead process was how input silently
+        // vanished — it must throw, never pretend.
+        let controller = InputController(displayID: CGMainDisplayID(), targetPID: 999_999)
+        XCTAssertThrowsError(try controller.typeText("x")) { error in
+            guard case InputError.targetNotFound = error else {
+                return XCTFail("expected targetNotFound, got \(error)")
+            }
+        }
+    }
+
+    func testKeyPress_deadTargetThrowsTargetNotFound() {
+        let controller = InputController(displayID: CGMainDisplayID(), targetPID: 999_999)
+        XCTAssertThrowsError(try controller.keyPress(InputController.KeyCode.returnKey,
+                                                     modifiers: .maskCommand)) { error in
+            guard case InputError.targetNotFound = error else {
+                return XCTFail("expected targetNotFound, got \(error)")
+            }
+        }
+    }
 }

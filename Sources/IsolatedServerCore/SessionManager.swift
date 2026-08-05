@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 import Foundation
 import IsolatedTesterKit
 
@@ -94,7 +95,51 @@ public actor SessionManager {
             sessionId: session.id,
             displayID: state.displayID,
             appPID: state.appPID.map { Int32($0) } ?? 0,
-            isRunning: state.isRunning
+            isRunning: state.isRunning,
+            windowsPlaced: state.windowsPlaced
+        )
+    }
+
+    /// Attach a running QEMU VM to an isolated display. Repeated calls for the
+    /// same PID reuse the existing session and never take ownership of QEMU.
+    public func attachVMSession(
+        pid: Int,
+        displayWidth: Int = 1280,
+        displayHeight: Int = 960
+    ) async throws -> SessionResponse {
+        guard pid > 1, pid <= Int(Int32.max) else {
+            throw ServerError.unknownAction("Invalid QEMU PID")
+        }
+        if let existing = sessions.values.first(where: { $0.state.appPID == pid_t(pid) && $0.state.isRunning }) {
+            let state = existing.state
+            sessionLastActivity[existing.id] = Date()
+            return SessionResponse(
+                sessionId: existing.id,
+                displayID: state.displayID,
+                appPID: Int32(pid),
+                isRunning: true,
+                windowsPlaced: state.windowsPlaced
+            )
+        }
+
+        let session = TestSession()
+        let config = VirtualDisplayManager.DisplayConfig(
+            width: displayWidth,
+            height: displayHeight,
+            ppi: 96,
+            name: "IsolatedVM-\(pid)"
+        )
+        let state = try await session.attachVM(pid: pid_t(pid), displayConfig: config)
+        let now = Date()
+        sessions[session.id] = session
+        sessionCreatedAt[session.id] = now
+        sessionLastActivity[session.id] = now
+        return SessionResponse(
+            sessionId: session.id,
+            displayID: state.displayID,
+            appPID: Int32(pid),
+            isRunning: state.isRunning,
+            windowsPlaced: state.windowsPlaced
         )
     }
 
@@ -168,12 +213,46 @@ public actor SessionManager {
         )
     }
 
+    /// Export a PNG frame to an owner-private local file for another local MCP
+    /// vision server. This is observation only; it does not actuate the guest.
+    public func sessionFrame(sessionId: String) async throws -> SessionFrameResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        let result = try await session.screenshot(format: .png)
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".isolated-tester/captures", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        _ = chmod(directory.path, 0o700)
+        let url = directory.appendingPathComponent("\(sessionId)-\(UUID().uuidString.lowercased()).png")
+        try result.imageData.write(to: url, options: .atomic)
+        _ = chmod(url.path, 0o600)
+        return SessionFrameResponse(
+            sessionId: sessionId,
+            path: url.path,
+            width: result.width,
+            height: result.height,
+            format: "png",
+            sizeKB: result.imageData.count / 1024
+        )
+    }
+
     /// Perform a UI action on a session.
     public func performAction(sessionId: String, action: ActionRequest) async throws {
         guard let session = sessions[sessionId] else {
             throw ServerError.sessionNotFound(sessionId)
         }
         sessionLastActivity[sessionId] = Date()
+
+        // Self-heal placement: apps that opened their first window after
+        // launch-time placement gave up get landed on the isolated display
+        // before we act, instead of typing into a mis-placed window.
+        _ = await session.ensurePlaced()
 
         switch action.action {
         case "click":

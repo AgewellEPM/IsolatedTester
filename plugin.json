@@ -1,6 +1,6 @@
 {
   "name": "isolated-tester",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "AI-powered isolated app testing for macOS. Launch any .app on a virtual display, control it with vision-based AI, and verify behavior without taking over your screen.",
   "author": "AgewellEPM",
   "homepage": "https://github.com/AgewellEPM/IsolatedTester",
@@ -14,11 +14,13 @@
   "mcp": {
     "command": "isolated-mcp",
     "transport": "stdio",
-    "toolCount": 19,
+    "toolCount": 21,
     "tools": [
       "create_session",
+      "attach_vm_session",
       "run_test",
       "screenshot",
+      "session_frame",
       "click",
       "type_text",
       "key_press",

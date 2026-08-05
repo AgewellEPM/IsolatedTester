@@ -1,5 +1,6 @@
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import Foundation
 
 /// Launches applications on a specific virtual display.
@@ -12,6 +13,11 @@ public final class AppLauncher: @unchecked Sendable {
         public let appURL: URL
         public let displayID: CGDirectDisplayID
         public let launchedAt: Date
+        public let ownsProcess: Bool
+        /// True only when at least one of the app's windows was actually moved
+        /// onto the target display. A session whose app never landed on the
+        /// isolated display is NOT isolated — callers must surface this.
+        public let windowsPlaced: Bool
     }
 
     private var launchedApps: [pid_t: LaunchedApp] = [:]
@@ -100,22 +106,103 @@ public final class AppLauncher: @unchecked Sendable {
         }
         ISTLogger.launcher.info("App launched, PID: \(pid)")
 
+        // Cold-starting apps (Safari with session restore, Office, etc.) can take
+        // well over 3s to make their first window — wait up to 15s, and record the
+        // outcome instead of discarding it.
+        let placed = await moveAppToDisplay(pid: pid, displayID: displayID)
+        if !placed {
+            ISTLogger.launcher.error("App \(pid) never landed on display \(displayID) — session is NOT isolated")
+        }
+
         let launched = LaunchedApp(
             pid: pid,
             bundleID: bundleID,
             appURL: appURL,
             displayID: displayID,
-            launchedAt: Date()
+            launchedAt: Date(),
+            ownsProcess: true,
+            windowsPlaced: placed
         )
 
-        lock.lock()
-        launchedApps[pid] = launched
-        lock.unlock()
-
-        // Move app window to virtual display (best effort)
-        await moveAppToDisplay(pid: pid, displayID: displayID)
+        store(launched)
 
         return launched
+    }
+
+    private func store(_ launched: LaunchedApp) {
+        lock.lock()
+        defer { lock.unlock() }
+        launchedApps[launched.pid] = launched
+    }
+
+    /// Retry placing an app's windows on its display (self-heal for apps whose
+    /// first window appeared after launch-time placement gave up). Returns the
+    /// updated placement state and records it.
+    public func retryPlacement(pid: pid_t, displayID: CGDirectDisplayID) async -> Bool {
+        let placed = await moveAppToDisplay(pid: pid, displayID: displayID, maxWaitTicks: 20)
+        if placed { markPlaced(pid: pid) }
+        return placed
+    }
+
+    private func markPlaced(pid: pid_t) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = launchedApps[pid] {
+            launchedApps[pid] = LaunchedApp(
+                pid: existing.pid, bundleID: existing.bundleID, appURL: existing.appURL,
+                displayID: existing.displayID, launchedAt: existing.launchedAt,
+                ownsProcess: existing.ownsProcess, windowsPlaced: true
+            )
+        }
+    }
+
+    /// Attach an already-running QEMU VM to an isolated display without taking
+    /// ownership of the VM process. The executable allowlist keeps this narrow:
+    /// this API cannot be used to move arbitrary host applications.
+    public func attachExistingVM(
+        pid: pid_t,
+        displayID: CGDirectDisplayID
+    ) async throws -> LaunchedApp {
+        guard pid > 1, isRunning(pid: pid) else {
+            throw AppLaunchError.launchFailed("QEMU process \(pid) is not running")
+        }
+        guard let executablePath = Self.executablePath(for: pid),
+              Self.isAllowedVMExecutable(path: executablePath) else {
+            throw AppLaunchError.launchFailed(
+                "Process \(pid) is not an allowed qemu-system-* virtual machine")
+        }
+
+        let moved = await moveAppToDisplay(pid: pid, displayID: displayID)
+        guard moved else {
+            throw AppLaunchError.windowMoveFailed(
+                "Could not move QEMU PID \(pid) to display \(displayID). Grant Accessibility to isolated-mcp/Kist and keep the QEMU window visible.")
+        }
+
+        return LaunchedApp(
+            pid: pid,
+            bundleID: nil,
+            appURL: URL(fileURLWithPath: executablePath),
+            displayID: displayID,
+            launchedAt: Date(),
+            ownsProcess: false,
+            windowsPlaced: true  // attachExistingVM throws when the move fails
+        )
+    }
+
+    public static func isAllowedVMExecutable(path: String) -> Bool {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        return resolved.lastPathComponent.hasPrefix("qemu-system-")
+            && FileManager.default.isExecutableFile(atPath: resolved.path)
+    }
+
+    public static func executablePath(for pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
+        // PROC_PIDPATHINFO_MAXSIZE is a C macro Swift cannot import on every SDK.
+        // Darwin defines it as four times MAXPATHLEN (4096 bytes).
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
     }
 
     /// Launch an app by bundle identifier.
@@ -159,21 +246,26 @@ public final class AppLauncher: @unchecked Sendable {
     // MARK: - Window Management
 
     /// Move all windows of a process to the specified display.
-    private func moveAppToDisplay(pid: pid_t, displayID: CGDirectDisplayID) async {
+    /// Waits up to maxWaitTicks × 100ms for the first window (default 15s —
+    /// cold launches with session restore routinely exceed the old 3s).
+    private func moveAppToDisplay(
+        pid: pid_t,
+        displayID: CGDirectDisplayID,
+        maxWaitTicks: Int = 150
+    ) async -> Bool {
         ISTLogger.launcher.debug("Moving app \(pid) to display \(displayID)")
-        // Wait for the app to create its first window (best effort, 3s timeout)
-        for _ in 0..<30 {
+        for _ in 0..<maxWaitTicks {
             if let windows = getWindows(for: pid), !windows.isEmpty {
                 let displayBounds = CGDisplayBounds(displayID)
 
-                for window in windows {
-                    moveWindow(window, to: displayBounds.origin)
+                return windows.reduce(false) { moved, window in
+                    moveWindow(window, to: displayBounds.origin) || moved
                 }
-                return
             }
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
         }
-        // App launched but no windows found — not an error, continue anyway
+        // App launched but no windows found.
+        return false
     }
 
     private func getWindows(for pid: pid_t) -> [[String: Any]]? {
@@ -189,23 +281,29 @@ public final class AppLauncher: @unchecked Sendable {
         return filtered.isEmpty ? nil : filtered
     }
 
-    private func moveWindow(_ window: [String: Any], to origin: CGPoint) {
-        guard let pid = window[kCGWindowOwnerPID as String] as? pid_t else { return }
+    private func moveWindow(_ window: [String: Any], to origin: CGPoint) -> Bool {
+        guard let pid = window[kCGWindowOwnerPID as String] as? pid_t else { return false }
 
         // Use Accessibility API to move the window
         let axApp = AXUIElementCreateApplication(pid)
 
         var axWindows: CFTypeRef?
-        AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows)
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindows) == .success else {
+            return false
+        }
 
-        guard let windows = axWindows as? [AXUIElement], !windows.isEmpty else { return }
+        guard let windows = axWindows as? [AXUIElement], !windows.isEmpty else { return false }
 
+        var moved = false
         for axWindow in windows {
             var position = origin
             if let posValue = AXValueCreate(.cgPoint, &position) {
-                AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue)
+                if AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue) == .success {
+                    moved = true
+                }
             }
         }
+        return moved
     }
 
     // MARK: - Lifecycle
@@ -235,7 +333,10 @@ public final class AppLauncher: @unchecked Sendable {
         lock.unlock()
 
         for pid in pids {
-            terminateApp(pid: pid)
+            lock.lock()
+            let owned = launchedApps[pid]?.ownsProcess == true
+            lock.unlock()
+            if owned { terminateApp(pid: pid) }
         }
     }
 

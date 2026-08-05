@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# IsolatedTester — Claude Code Plugin Installer
-# Builds from source and configures as a Claude Code MCP server.
+# IsolatedTester — Codex/Kist Plugin Installer
+# Builds from source and configures the local MCP server.
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -57,7 +57,19 @@ mkdir -p "$BIN_DIR"
 for bin in "${BINARIES[@]}"; do
     cp "$BUILD_DIR/$bin" "$BIN_DIR/$bin"
 done
-ok "Binaries installed."
+
+# Sign with a STABLE identity so TCC grants (Screen Recording, Accessibility)
+# survive rebuilds. Adhoc signatures are per-hash: every rebuild silently
+# revoked the grants and ScreenCaptureKit then blocked forever.
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 'Developer ID Application' | sed -E 's/.*"(.*)"/\1/')"
+for bin in "${BINARIES[@]}"; do
+    if [[ -n "$SIGN_ID" ]]; then
+        codesign -f -s "$SIGN_ID" "$BIN_DIR/$bin"
+    else
+        codesign -f -s - "$BIN_DIR/$bin"
+    fi
+done
+ok "Binaries installed & signed (${SIGN_ID:-adhoc})."
 
 # Ensure ~/.local/bin is on PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -103,8 +115,8 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}IsolatedTester installed successfully!${NC}"
 echo ""
-echo "  19 MCP tools available in Claude Code:"
-echo "    create_session, run_test, screenshot, click, type_text,"
+echo "  21 MCP tools available:"
+echo "    create_session, attach_vm_session, run_test, screenshot, session_frame, click, type_text,"
 echo "    key_press, scroll, drag, list_sessions, stop_session,"
 echo "    list_displays, check_permissions, get_test_report,"
 echo "    cancel_test, get_accessibility_tree, get_interactive_elements,"

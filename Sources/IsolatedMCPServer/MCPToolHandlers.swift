@@ -18,6 +18,11 @@ final class MCPToolHandlers {
                 param("displayWidth", "integer", "Display width (default: 1920)"),
                 param("displayHeight", "integer", "Display height (default: 1080)"),
             ]),
+            tool("attach_vm_session", "Attach a running qemu-system-* VM to an isolated virtual display without owning or terminating the VM", [
+                param("pid", "integer", "Running QEMU process ID", required: true),
+                param("displayWidth", "integer", "Display width (default: 1280)"),
+                param("displayHeight", "integer", "Display height (default: 960)"),
+            ]),
             tool("run_test", "Run an AI-driven visual test", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("objective", "string", "What the test should accomplish", required: true),
@@ -28,9 +33,12 @@ final class MCPToolHandlers {
                 param("model", "string", "Model name override"),
                 param("maxSteps", "integer", "Maximum test steps (default: 25)"),
             ]),
-            tool("screenshot", "Capture the current screen state", [
+            tool("screenshot", "Export the current screen state to an owner-private local image file; returns path metadata, never base64 image bytes", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("format", "string", "Image format: png or jpeg"),
+            ]),
+            tool("session_frame", "Export a PNG frame from an isolated session to an owner-private local file for vision analysis", [
+                param("sessionId", "string", "Session ID", required: true),
             ]),
             tool("click", "Click at coordinates", [
                 param("sessionId", "string", "Session ID", required: true),
@@ -106,6 +114,14 @@ final class MCPToolHandlers {
                 )
                 result = encode(response)
 
+            case "attach_vm_session":
+                let response = try await sessionManager.attachVMSession(
+                    pid: args["pid"] as? Int ?? 0,
+                    displayWidth: args["displayWidth"] as? Int ?? 1280,
+                    displayHeight: args["displayHeight"] as? Int ?? 960
+                )
+                result = encode(response)
+
             case "run_test":
                 let sessionId = args["sessionId"] as? String ?? ""
                 let provider = args["provider"] as? String ?? "anthropic"
@@ -132,9 +148,14 @@ final class MCPToolHandlers {
                 result = encode(response)
 
             case "screenshot":
-                let response = try await sessionManager.screenshot(
-                    sessionId: args["sessionId"] as? String ?? "",
-                    format: args["format"] as? String ?? "png"
+                let response = try await sessionManager.sessionFrame(
+                    sessionId: args["sessionId"] as? String ?? ""
+                )
+                result = encode(response)
+
+            case "session_frame":
+                let response = try await sessionManager.sessionFrame(
+                    sessionId: args["sessionId"] as? String ?? ""
                 )
                 result = encode(response)
 
@@ -251,7 +272,7 @@ final class MCPToolHandlers {
                     ],
                     "virtualDisplayAvailable": virtualDisplayAvailable,
                     "activeSessions": activeSessions,
-                    "toolCount": 19,
+                    "toolCount": 21,
                     "status": perms.allGranted ? "ready" : "permissions_required"
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
