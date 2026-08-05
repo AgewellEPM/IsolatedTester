@@ -24,6 +24,25 @@ public struct PermissionChecker {
         )
     }
 
+    /// Actively trigger the macOS permission prompts for anything not yet
+    /// granted. This registers THIS binary in System Settings → Privacy &
+    /// Security → Screen Recording / Accessibility, so the operator can slide
+    /// the toggle on. Returns the status observed immediately after requesting
+    /// (Screen Recording usually still reads false until the app is relaunched,
+    /// which is expected — the point is that the toggle now exists).
+    @discardableResult
+    public static func request() -> PermissionStatus {
+        // CGRequestScreenCaptureAccess() shows the prompt and adds the app to
+        // the Screen Recording list. It only prompts when not already granted.
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+        }
+        // Passing prompt:true makes the Accessibility prompt appear on demand.
+        let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(axOptions)
+        return check()
+    }
+
     /// Print permission status and instructions for any missing permissions.
     /// Returns true if all permissions are granted.
     ///

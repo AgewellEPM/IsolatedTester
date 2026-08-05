@@ -107,6 +107,12 @@ public actor SessionManager {
     private func startFrameHistoryIfEnabled(_ session: TestSession) {
         let env = ProcessInfo.processInfo.environment
         guard env["IST_FRAME_HISTORY"] != "0" else { return }
+        // If Screen Recording isn't granted yet, fire the prompt now so the
+        // operator can slide the toggle on — the history loop otherwise pauses
+        // with an honest reason instead of capturing.
+        if !PermissionChecker.check().screenRecording {
+            PermissionChecker.request()
+        }
         let capacity = env["IST_FRAME_CAPACITY"].flatMap(Int.init) ?? 300
         do {
             try session.startFrameHistory(intervalSeconds: 1.0, capacity: capacity)
@@ -617,6 +623,18 @@ public actor SessionManager {
     /// Check macOS permissions.
     public func checkPermissions() -> PermissionsResponse {
         let status = PermissionChecker.check()
+        return PermissionsResponse(
+            screenRecording: status.screenRecording,
+            accessibility: status.accessibility,
+            allGranted: status.screenRecording && status.accessibility
+        )
+    }
+
+    /// Actively fire the macOS permission prompts so the operator can slide the
+    /// Screen Recording / Accessibility toggles on. Registers this binary in
+    /// System Settings even when the prompt itself is dismissed.
+    public func requestPermissions() -> PermissionsResponse {
+        let status = PermissionChecker.request()
         return PermissionsResponse(
             screenRecording: status.screenRecording,
             accessibility: status.accessibility,

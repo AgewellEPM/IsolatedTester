@@ -278,10 +278,19 @@ public final class TestSession: @unchecked Sendable {
             var consecutiveFailures = 0
             while !Task.isCancelled {
                 guard let self else { break }
+                // Fail FAST on a missing Screen Recording grant: preflight is a
+                // cheap non-blocking check, so we report the honest reason (and
+                // where to fix it) instead of hanging on the consent picker.
+                guard CGPreflightScreenCaptureAccess() else {
+                    self.setFrameHistoryError(
+                        "Screen Recording is not granted — frame history is paused. "
+                        + "Call request_permissions (or System Settings → Privacy & Security "
+                        + "→ Screen Recording), enable IsolatedTester, then start a new session.")
+                    break
+                }
                 do {
-                    // ScreenCaptureKit HANGS (not errors) without a Screen
-                    // Recording grant — race a deadline so the loop stays
-                    // honest and can report why it stopped.
+                    // Even with the grant, race a deadline so a transient
+                    // ScreenCaptureKit stall can't wedge the loop.
                     let shot = try await self.captureWithTimeout(seconds: 10)
                     _ = try store.record(shot.imageData, width: shot.width, height: shot.height)
                     consecutiveFailures = 0

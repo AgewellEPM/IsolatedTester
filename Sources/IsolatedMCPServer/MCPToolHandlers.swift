@@ -92,6 +92,7 @@ final class MCPToolHandlers {
             ]),
             tool("list_displays", "List available displays", []),
             tool("check_permissions", "Check macOS permissions", []),
+            tool("request_permissions", "Fire the macOS Screen Recording + Accessibility prompts on demand and register IsolatedTester in System Settings → Privacy & Security so the operator can slide the toggle on. Screen Recording usually still reads false until the next launch — that's expected, the toggle now exists", []),
             tool("get_test_report", "Get test report for a session", [
                 param("sessionId", "string", "Session ID", required: true),
             ]),
@@ -269,6 +270,10 @@ final class MCPToolHandlers {
             case "list_displays":
                 let displays = await sessionManager.listDisplays()
                 result = encode(displays)
+
+            case "request_permissions":
+                let requested = await sessionManager.requestPermissions()
+                result = encode(requested)
 
             case "check_permissions":
                 let perms = await sessionManager.checkPermissions()
