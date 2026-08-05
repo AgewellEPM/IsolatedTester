@@ -155,6 +155,44 @@ public struct FrameOCRResponse: Codable, Sendable {
     }
 }
 
+public struct FlipbookResponse: Codable, Sendable {
+    public let sessionId: String
+    public let directory: String
+    public let indexPath: String
+    /// Frames exported after change-detection dedup (repeated frames skipped).
+    public let exportedCount: Int
+    public let totalConsidered: Int
+
+    public init(sessionId: String, directory: String, indexPath: String,
+                exportedCount: Int, totalConsidered: Int) {
+        self.sessionId = sessionId
+        self.directory = directory
+        self.indexPath = indexPath
+        self.exportedCount = exportedCount
+        self.totalConsidered = totalConsidered
+    }
+}
+
+public struct SealResponse: Codable, Sendable {
+    public let sessionId: String
+    public let entryCount: Int
+    public let chainHead: String
+    public let frameCount: Int
+    public let manifestPath: String
+    /// True = the hash chain verified end-to-end at seal time.
+    public let chainIntact: Bool
+
+    public init(sessionId: String, entryCount: Int, chainHead: String, frameCount: Int,
+                manifestPath: String, chainIntact: Bool) {
+        self.sessionId = sessionId
+        self.entryCount = entryCount
+        self.chainHead = chainHead
+        self.frameCount = frameCount
+        self.manifestPath = manifestPath
+        self.chainIntact = chainIntact
+    }
+}
+
 public struct AsciiFrameResponse: Codable, Sendable {
     public let sessionId: String
     public let ordinal: Int

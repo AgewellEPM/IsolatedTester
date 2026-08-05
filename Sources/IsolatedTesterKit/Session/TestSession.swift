@@ -141,9 +141,12 @@ public final class TestSession: @unchecked Sendable {
     /// End the session: terminate app, destroy display.
     public func stop() {
         stopFrameHistory()
-        // P2 will add a seal step; until a seal exists, a stopped session's
-        // frames are purged so ~/.isolated-tester doesn't accrete garbage.
-        frameHistoryStore?.purge()
+        // Seal the evidence before teardown: a terminal chain entry + a
+        // manifest of the ordered frames still on disk. Frames are retained
+        // (not purged) so the seal's referenced files exist for verification.
+        if let ledger = receipts {
+            _ = try? ledger.seal(frames: frameHistoryStore?.history(last: Int.max) ?? [])
+        }
         if let app, app.ownsProcess {
             let pid = app.pid
             launcher.terminateApp(pid: pid)
@@ -240,6 +243,7 @@ public final class TestSession: @unchecked Sendable {
     private var frameStore: FrameStore?
     private var frameHistoryTask: Task<Void, Never>?
     private var frameHistoryError: String?
+    private var receipts: SessionReceipts?
 
     /// Continuous ~1fps capture into a bounded on-disk ring (default 300
     /// frames ≈ 5 minutes). Fails safe: five consecutive capture failures
@@ -251,12 +255,22 @@ public final class TestSession: @unchecked Sendable {
         lock.unlock()
         guard !alreadyRunning else { return }
 
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".isolated-tester/sessions/\(id)/frames", isDirectory: true)
-        let store = try FrameStore(directory: dir, capacity: capacity)
+        let sessionDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".isolated-tester/sessions/\(id)", isDirectory: true)
+        let store = try FrameStore(directory: sessionDir.appendingPathComponent("frames", isDirectory: true),
+                                   capacity: capacity)
+        let ledger = try SessionReceipts(sessionID: id, directory: sessionDir)
+        store.onRecord = { frame in
+            ledger.append(kind: "frame", detail: "ordinal=\(frame.ordinal)",
+                          sha256: frame.sha256, atUptime: frame.capturedAtUptime)
+        }
+        store.onEvict = { frame in
+            ledger.append(kind: "eviction", detail: "ordinal=\(frame.ordinal)", sha256: frame.sha256)
+        }
 
         lock.lock()
         frameStore = store
+        receipts = ledger
         frameHistoryError = nil
         lock.unlock()
 
@@ -379,7 +393,20 @@ public final class TestSession: @unchecked Sendable {
         )
         lock.lock()
         actionLog.append(record)
+        let ledger = receipts
         lock.unlock()
+        ledger?.append(kind: "action", detail: "\(action): \(details)")
+    }
+
+    /// Verify the session's evidence chain (nil = intact, else first broken index).
+    public func receiptsFirstBrokenIndex() -> Int? {
+        lock.lock(); let ledger = receipts; lock.unlock()
+        return ledger?.firstBrokenIndex()
+    }
+
+    public var receiptsLedger: SessionReceipts? {
+        lock.lock(); defer { lock.unlock() }
+        return receipts
     }
 
     deinit {

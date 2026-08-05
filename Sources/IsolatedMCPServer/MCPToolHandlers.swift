@@ -54,6 +54,13 @@ final class MCPToolHandlers {
                 param("cols", "integer", "Grid width in characters, 20-400 (default 160)"),
                 param("overlayText", "boolean", "Stamp OCR text into the grid (default true)"),
             ]),
+            tool("seal_session", "Seal the session's evidence chain (hash-linked receipts of every captured frame, eviction, and action) and write a frame manifest. Reports whether the chain verified end-to-end. Non-destructive; the session keeps running", [
+                param("sessionId", "string", "Session ID", required: true),
+            ]),
+            tool("flipbook_export", "Export a bounded, change-detected flipbook of the session's frame history (repeated frames skipped, each captioned via OCR) to ~/.kist/visual-flipbooks/<session>/ with an index.json — a time-lapse a non-visual model can page through", [
+                param("sessionId", "string", "Session ID", required: true),
+                param("maxFrames", "integer", "Max frames to export (default 60)"),
+            ]),
             tool("click", "Click at coordinates", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("x", "number", "X coordinate", required: true),
@@ -193,6 +200,19 @@ final class MCPToolHandlers {
                     ordinal: args["ordinal"] as? Int,
                     cols: args["cols"] as? Int ?? 160,
                     overlayText: args["overlayText"] as? Bool ?? true
+                )
+                result = encode(response)
+
+            case "seal_session":
+                let response = try await sessionManager.sealSession(
+                    sessionId: args["sessionId"] as? String ?? ""
+                )
+                result = encode(response)
+
+            case "flipbook_export":
+                let response = try await sessionManager.flipbookExport(
+                    sessionId: args["sessionId"] as? String ?? "",
+                    maxFrames: args["maxFrames"] as? Int ?? 60
                 )
                 result = encode(response)
 

@@ -29,6 +29,12 @@ public final class FrameStore: @unchecked Sendable {
     private var nextOrdinal = 0
     private let lock = NSLock()
 
+    /// Optional observers invoked (outside the lock) when a frame is recorded
+    /// or evicted — the receipts ledger hooks in here so evidence tracks the
+    /// exact ring contents.
+    public var onRecord: (@Sendable (Frame) -> Void)?
+    public var onEvict: (@Sendable (Frame) -> Void)?
+
     public enum StoreError: Error, LocalizedError {
         case invalidCapacity(Int)
         public var errorDescription: String? {
@@ -87,8 +93,10 @@ public final class FrameStore: @unchecked Sendable {
         }
         lock.unlock()
 
+        onRecord?(frame)
         for old in evicted {
             try? FileManager.default.removeItem(atPath: old.path)
+            onEvict?(old)
         }
         return frame
     }

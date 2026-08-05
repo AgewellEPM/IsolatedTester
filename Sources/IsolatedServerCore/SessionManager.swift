@@ -139,6 +139,82 @@ public actor SessionManager {
         )
     }
 
+    /// Export a bounded flipbook for non-visual models: change-detected frames
+    /// (repeated sha256 skipped) with an OCR caption each, written under
+    /// ~/.kist/visual-flipbooks/<session>/ with an index.json. Makes the
+    /// console's long-standing "1fps-to-300-frame flipbook" prompt real.
+    public func flipbookExport(sessionId: String, maxFrames: Int = 60) throws -> FlipbookResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        guard let store = session.frameHistoryStore else {
+            throw ServerError.unknownAction("session \(sessionId) has no frame history")
+        }
+        let all = store.history(last: Int.max)
+        // Change-detection: keep a frame only when its hash differs from the last kept.
+        var kept: [FrameStore.Frame] = []
+        var lastHash = ""
+        for frame in all where frame.sha256 != lastHash {
+            kept.append(frame)
+            lastHash = frame.sha256
+        }
+        if kept.count > maxFrames {
+            // Evenly subsample down to the cap so the flipbook spans the session.
+            let stride = Double(kept.count) / Double(maxFrames)
+            kept = (0..<maxFrames).map { kept[Int(Double($0) * stride)] }
+        }
+
+        let outDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kist/visual-flipbooks/\(sessionId)", isDirectory: true)
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        var indexEntries: [[String: Any]] = []
+        for (i, frame) in kept.enumerated() {
+            let dest = outDir.appendingPathComponent(String(format: "flip-%04d.jpg", i))
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(atPath: frame.path, toPath: dest.path)
+            let caption = (try? FrameOCR.recognize(path: frame.path, expectedSha256: frame.sha256))?
+                .observations.prefix(8).map(\.text).joined(separator: " · ") ?? ""
+            indexEntries.append([
+                "index": i, "ordinal": frame.ordinal, "file": dest.lastPathComponent,
+                "sha256": frame.sha256, "caption": caption,
+            ])
+        }
+        let index: [String: Any] = ["sessionID": sessionId, "frames": indexEntries]
+        let indexURL = outDir.appendingPathComponent("index.json")
+        let data = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys, .prettyPrinted])
+        try data.write(to: indexURL, options: .atomic)
+
+        return FlipbookResponse(
+            sessionId: sessionId, directory: outDir.path, indexPath: indexURL.path,
+            exportedCount: kept.count, totalConsidered: all.count
+        )
+    }
+
+    /// Seal a live session's evidence chain without stopping it: appends a
+    /// terminal entry, writes the frame manifest, and reports whether the
+    /// hash chain verified end-to-end.
+    public func sealSession(sessionId: String) throws -> SealResponse {
+        guard let session = sessions[sessionId] else {
+            throw ServerError.sessionNotFound(sessionId)
+        }
+        sessionLastActivity[sessionId] = Date()
+        guard let ledger = session.receiptsLedger else {
+            throw ServerError.unknownAction("session \(sessionId) has no evidence ledger")
+        }
+        let frames = session.frameHistoryStore?.history(last: Int.max) ?? []
+        let seal = try ledger.seal(frames: frames)
+        return SealResponse(
+            sessionId: sessionId,
+            entryCount: seal.entryCount,
+            chainHead: seal.chainHead,
+            frameCount: seal.frameCount,
+            manifestPath: seal.path,
+            chainIntact: ledger.firstBrokenIndex() == nil
+        )
+    }
+
     /// ASCII vision bridge: render a history frame (default: newest) as a
     /// character grid with OCR text stamped in place — sight for text-only
     /// models, with grid→pixel scale for acting on what they see.
