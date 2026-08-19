@@ -20,7 +20,7 @@ public final class InputController: @unchecked Sendable {
 
     /// Move the mouse cursor to a position on the virtual display.
     public func mouseMove(to point: CGPoint) throws {
-        let absolutePoint = toAbsolute(point)
+        let absolutePoint = try toAbsolute(point)
 
         guard let event = CGEvent(
             mouseEventSource: eventSource,
@@ -36,7 +36,7 @@ public final class InputController: @unchecked Sendable {
 
     /// Click at a position on the virtual display.
     public func click(at point: CGPoint, button: CGMouseButton = .left, clickCount: Int = 1) throws {
-        let absolutePoint = toAbsolute(point)
+        let absolutePoint = try toAbsolute(point)
 
         let downType: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
         let upType: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
@@ -92,8 +92,8 @@ public final class InputController: @unchecked Sendable {
 
     /// Drag from one point to another.
     public func drag(from start: CGPoint, to end: CGPoint, steps: Int = 20) throws {
-        let absStart = toAbsolute(start)
-        let absEnd = toAbsolute(end)
+        let absStart = try toAbsolute(start)
+        let absEnd = try toAbsolute(end)
 
         // Mouse down at start
         guard let downEvent = CGEvent(
@@ -218,27 +218,69 @@ public final class InputController: @unchecked Sendable {
 
     // MARK: - Coordinate Translation
 
-    private func toAbsolute(_ point: CGPoint) -> CGPoint {
-        let displayBounds = CGDisplayBounds(displayID)
-        return CGPoint(
-            x: displayBounds.origin.x + point.x,
-            y: displayBounds.origin.y + point.y
-        )
+    private func toAbsolute(_ point: CGPoint) throws -> CGPoint {
+        if displayID != 0 {
+            let displayBounds = CGDisplayBounds(displayID)
+            if !displayBounds.isEmpty {
+                return CGPoint(
+                    x: displayBounds.origin.x + point.x,
+                    y: displayBounds.origin.y + point.y
+                )
+            }
+        }
+        // Headless session (displayID 0) or a display that no longer exists:
+        // ground coordinates in the target app's own window. CGDisplayBounds(0)
+        // is a zero rect, which used to aim every click at the user's main
+        // display's coordinate space and miss the off-screen window entirely
+        // (input "succeeded" but never arrived).
+        guard let pid = targetPID, let frame = Self.largestWindowFrame(pid: pid) else {
+            throw InputError.cannotGroundCoordinates(displayID)
+        }
+        return CGPoint(x: frame.origin.x + point.x, y: frame.origin.y + point.y)
+    }
+
+    /// Largest normal-layer window frame for a PID in global CG (top-left
+    /// origin) coordinates — the same space CGEvent positions use. Off-screen
+    /// windows are included, which is what makes headless input land.
+    static func largestWindowFrame(pid: pid_t) -> CGRect? {
+        guard let info = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        var best: CGRect?
+        var bestArea: CGFloat = 0
+        for entry in info {
+            guard let owner = entry[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
+                  let layer = entry[kCGWindowLayer as String] as? Int, layer == 0,
+                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"],
+                  let width = bounds["Width"], let height = bounds["Height"],
+                  width > 1, height > 1
+            else { continue }
+            let area = width * height
+            if area > bestArea {
+                bestArea = area
+                best = CGRect(x: x, y: y, width: width, height: height)
+            }
+        }
+        return best
     }
 
     // MARK: - Event Posting
 
     private func postEvent(_ event: CGEvent) throws {
-        if let pid = targetPID {
-            // Fail loudly when the target died — a "successful" post to a dead
-            // process is how input silently vanished while reporting success.
-            guard kill(pid, 0) == 0 else {
-                throw InputError.targetNotFound(pid)
-            }
-            event.postToPid(pid)
-        } else {
-            event.post(tap: .cghidEventTap)
+        // Isolation invariant: input is ONLY delivered to the session-owned
+        // process. There is deliberately no global-tap path — posting to
+        // .cghidEventTap drives the user's real cursor and keyboard focus,
+        // which is exactly the live-desktop hijack this tool exists to prevent.
+        guard let pid = targetPID else {
+            throw InputError.noTargetProcess
         }
+        // Fail loudly when the target died — a "successful" post to a dead
+        // process is how input silently vanished while reporting success.
+        guard kill(pid, 0) == 0 else {
+            throw InputError.targetNotFound(pid)
+        }
+        event.postToPid(pid)
     }
 }
 
@@ -390,11 +432,19 @@ public extension InputController {
 public enum InputError: Error, LocalizedError {
     case eventCreationFailed(String)
     case targetNotFound(pid_t)
+    case noTargetProcess
+    case cannotGroundCoordinates(CGDirectDisplayID)
 
     public var errorDescription: String? {
         switch self {
         case .eventCreationFailed(let ctx): return "Failed to create CGEvent: \(ctx)"
         case .targetNotFound(let pid): return "Process \(pid) not found"
+        case .noTargetProcess:
+            return "Input refused: no session-owned target process. Global input injection "
+                + "is not allowed — it would drive the user's real cursor and keyboard."
+        case .cannotGroundCoordinates(let display):
+            return "Cannot ground coordinates: display \(display) has no bounds and the "
+                + "target app has no measurable window yet"
         }
     }
 }

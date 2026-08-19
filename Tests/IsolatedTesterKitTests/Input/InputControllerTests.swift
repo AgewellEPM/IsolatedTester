@@ -110,4 +110,40 @@ final class InputControllerTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - 2026-08-18 isolation pins (no global input, grounded coordinates)
+
+    func testNoTargetPID_refusesInputInsteadOfGlobalPost() {
+        // Without a session-owned PID, input used to fall through to
+        // .cghidEventTap — the user's REAL cursor and keyboard. It must refuse.
+        let controller = InputController(displayID: CGMainDisplayID())
+        XCTAssertThrowsError(try controller.typeText("x")) { error in
+            guard case InputError.noTargetProcess = error else {
+                return XCTFail("expected noTargetProcess, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try controller.keyPress(InputController.KeyCode.returnKey)) { error in
+            guard case InputError.noTargetProcess = error else {
+                return XCTFail("expected noTargetProcess, got \(error)")
+            }
+        }
+    }
+
+    func testHeadlessClick_withoutWindowThrowsInsteadOfAimingAtMainDisplay() {
+        // displayID 0 (headless) has no display bounds. Clicks used to resolve
+        // against a zero rect — the main display's coordinate space — and miss
+        // the off-screen window while reporting success. With no measurable
+        // window to ground against, the click must throw, not guess.
+        let controller = InputController(displayID: 0,
+                                         targetPID: ProcessInfo.processInfo.processIdentifier)
+        XCTAssertThrowsError(try controller.click(at: CGPoint(x: 10, y: 10))) { error in
+            guard case InputError.cannotGroundCoordinates = error else {
+                return XCTFail("expected cannotGroundCoordinates, got \(error)")
+            }
+        }
+    }
+
+    func testLargestWindowFrame_bogusPIDReturnsNil() {
+        XCTAssertNil(InputController.largestWindowFrame(pid: 999_999))
+    }
 }

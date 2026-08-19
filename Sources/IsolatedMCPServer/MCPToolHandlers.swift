@@ -144,11 +144,20 @@ final class MCPToolHandlers {
             let result: Any
             switch name {
             case "create_session":
+                // fallbackToMainDisplay was an undocumented arg that DEFAULTED
+                // to true, so a failed virtual display silently took over the
+                // user's real screen (2026-08-18 incident). Sessions are now
+                // always isolated (virtual display or headless); an explicit
+                // true is refused loudly so callers learn the contract changed.
+                if args["fallbackToMainDisplay"] as? Bool == true {
+                    throw ServerError.invalidRequest(
+                        "fallbackToMainDisplay was removed: sessions never use the real display. "
+                        + "Isolation degrades to headless window-capture, not to the user's screen.")
+                }
                 let response = try await sessionManager.createSession(
                     appPath: args["appPath"] as? String ?? "",
                     displayWidth: args["displayWidth"] as? Int ?? 1920,
                     displayHeight: args["displayHeight"] as? Int ?? 1080,
-                    fallbackToMainDisplay: args["fallbackToMainDisplay"] as? Bool ?? true,
                     objective: args["objective"] as? String
                 )
                 result = encode(response)

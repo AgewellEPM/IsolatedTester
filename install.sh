@@ -11,6 +11,7 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 BIN_DIR="$HOME/.local/bin"
+PACKAGE_BIN_DIR=""
 BINARIES=(isolated isolated-mcp isolated-http)
 
 info()  { echo -e "${BOLD}==>${NC} $1"; }
@@ -38,6 +39,7 @@ ok "Swift found: $SWIFT_VERSION"
 # ── Build ──────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PACKAGE_BIN_DIR="$SCRIPT_DIR/bin"
 cd "$SCRIPT_DIR"
 
 info "Building IsolatedTester (release)..."
@@ -51,23 +53,26 @@ ok "Build succeeded."
 
 # ── Install binaries ──────────────────────────────────────────
 
-info "Installing binaries to $BIN_DIR..."
-mkdir -p "$BIN_DIR"
+info "Installing binaries to $PACKAGE_BIN_DIR and $BIN_DIR..."
+mkdir -p "$PACKAGE_BIN_DIR" "$BIN_DIR"
 
 for bin in "${BINARIES[@]}"; do
-    cp "$BUILD_DIR/$bin" "$BIN_DIR/$bin"
+    install -m 755 "$BUILD_DIR/$bin" "$PACKAGE_BIN_DIR/$bin"
+    install -m 755 "$BUILD_DIR/$bin" "$BIN_DIR/$bin"
 done
 
 # Sign with a STABLE identity so TCC grants (Screen Recording, Accessibility)
 # survive rebuilds. Adhoc signatures are per-hash: every rebuild silently
 # revoked the grants and ScreenCaptureKit then blocked forever.
 SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 'Developer ID Application' | sed -E 's/.*"(.*)"/\1/')"
-for bin in "${BINARIES[@]}"; do
-    if [[ -n "$SIGN_ID" ]]; then
-        codesign -f -s "$SIGN_ID" "$BIN_DIR/$bin"
-    else
-        codesign -f -s - "$BIN_DIR/$bin"
-    fi
+for destination in "$PACKAGE_BIN_DIR" "$BIN_DIR"; do
+    for bin in "${BINARIES[@]}"; do
+        if [[ -n "$SIGN_ID" ]]; then
+            codesign -f -s "$SIGN_ID" "$destination/$bin"
+        else
+            codesign -f -s - "$destination/$bin"
+        fi
+    done
 done
 ok "Binaries installed & signed (${SIGN_ID:-adhoc})."
 
@@ -115,9 +120,9 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}IsolatedTester installed successfully!${NC}"
 echo ""
-echo "  29 MCP tools available:"
-echo "    create_session, attach_vm_session, run_test, screenshot, session_frame,"
-echo "    frame_history, start_recording, stop_recording, ocr_frame, ascii_frame,"
+echo "  32 MCP tools available:"
+echo "    create_session, set_objective, attach_vm_session, run_test, screenshot, session_frame,"
+echo "    frame_history, start_recording, stop_recording, session_report, trend_report, ocr_frame, ascii_frame,"
 echo "    seal_session, flipbook_export, click, type_text, key_press, scroll, drag,"
 echo "    list_sessions, stop_session, list_displays, check_permissions,"
 echo "    request_permissions, get_test_report, cancel_test, get_accessibility_tree,"

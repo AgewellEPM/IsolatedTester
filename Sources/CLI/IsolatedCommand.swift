@@ -140,6 +140,9 @@ struct Launch: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Display ID (0 = main display)")
     var display: UInt32 = 0
 
+    @Flag(name: .long, help: "Run VISIBLY on the real main display (not isolated). Default is an isolated session: virtual display or headless.")
+    var onMainDisplay = false
+
     func run() async throws {
         verbosityOptions.apply()
         guard PermissionChecker.checkAndPrint() else { throw ExitCode.failure }
@@ -153,7 +156,11 @@ struct Launch: AsyncParsableCommand {
         out("Launching \(appPath)...")
         let session = TestSession()
 
-        let state = try await session.startOnMainDisplay(appURL: appURL)
+        // Isolated by default — the main display only with the explicit flag
+        // (running on the real screen used to be the silent default).
+        let state = onMainDisplay
+            ? try await session.startOnMainDisplay(appURL: appURL)
+            : try await session.start(appURL: appURL)
         out("Session started: \(state.sessionID)")
         out("  Display: \(state.displayID)")
         out("  App PID: \(state.appPID ?? 0)")
@@ -229,6 +236,9 @@ struct Test: AsyncParsableCommand {
     @Option(name: .long, help: "Path to config file")
     var config: String?
 
+    @Flag(name: .long, help: "Run VISIBLY on the real main display (not isolated). Default is an isolated session: virtual display or headless.")
+    var onMainDisplay = false
+
     func run() async throws {
         verbosityOptions.apply()
         guard PermissionChecker.checkAndPrint() else { throw ExitCode.failure }
@@ -274,10 +284,14 @@ struct Test: AsyncParsableCommand {
             resolvedKey = key
         }
 
-        // 3. Start session
+        // 3. Start session — isolated by default; the real display only with
+        // the explicit flag (running on the user's screen used to be the
+        // silent default).
         let session = TestSession()
         ISTLogger.info("Starting test session...")
-        let state = try await session.startOnMainDisplay(appURL: appURL)
+        let state = onMainDisplay
+            ? try await session.startOnMainDisplay(appURL: appURL)
+            : try await session.start(appURL: appURL)
         ISTLogger.info("Session \(state.sessionID) started (PID: \(state.appPID ?? 0))")
 
         // 4. Configure agent with config values

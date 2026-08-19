@@ -65,12 +65,13 @@ public actor SessionManager {
 
     // MARK: - Session Lifecycle
 
-    /// Create and start a new test session.
+    /// Create and start a new test session. Sessions are always isolated —
+    /// virtual display when available, headless window-capture otherwise. The
+    /// main-display fallback was removed after it hijacked the live desktop.
     public func createSession(
         appPath: String,
         displayWidth: Int = 1920,
         displayHeight: Int = 1080,
-        fallbackToMainDisplay: Bool = true,
         objective: String? = nil
     ) async throws -> SessionResponse {
         let session = TestSession()
@@ -83,8 +84,7 @@ public actor SessionManager {
 
         let state = try await session.start(
             appURL: appURL,
-            displayConfig: displayConfig,
-            fallbackToMainDisplay: fallbackToMainDisplay
+            displayConfig: displayConfig
         )
 
         let now = Date()

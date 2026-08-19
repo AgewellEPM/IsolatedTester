@@ -192,12 +192,40 @@ public final class VirtualDisplayManager: @unchecked Sendable {
 
         ISTLogger.display.info("Created virtual display \(displayIDValue)")
 
+        // Arrange the new display corner-diagonal to the main display. Left to
+        // WindowServer's default edge-adjacent placement, the user's REAL
+        // cursor can slide off a shared edge into the invisible display and
+        // vanish ("trapped and couldn't get out", 2026-08-18). Corner
+        // adjacency is a valid arrangement with no shared edge to cross.
+        // Best-effort: a failure leaves default adjacency, which is
+        // survivable but leaky — so it's logged, not fatal.
+        cornerPin(displayID: displayIDValue)
+
         lock.lock()
         displays[displayIDValue] = managed
         virtualDisplayObjects[displayIDValue] = displayObj // Keep alive!
         lock.unlock()
 
         return managed
+    }
+
+    /// Pin a display's origin to the main display's bottom-right corner so the
+    /// two share only a corner point, not an edge the cursor can cross.
+    private func cornerPin(displayID: CGDirectDisplayID) {
+        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        var configRef: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&configRef) == .success, let configRef else {
+            ISTLogger.display.error("Corner-pin: CGBeginDisplayConfiguration failed — display \(displayID) keeps default adjacency")
+            return
+        }
+        CGConfigureDisplayOrigin(configRef, displayID,
+                                 Int32(mainBounds.maxX), Int32(mainBounds.maxY))
+        let result = CGCompleteDisplayConfiguration(configRef, .forSession)
+        if result == .success {
+            ISTLogger.display.info("Corner-pinned display \(displayID) at (\(Int(mainBounds.maxX)), \(Int(mainBounds.maxY)))")
+        } else {
+            ISTLogger.display.error("Corner-pin failed (\(result.rawValue)) — display \(displayID) keeps default adjacency")
+        }
     }
 
     /// Check if CGVirtualDisplay is available on this system.

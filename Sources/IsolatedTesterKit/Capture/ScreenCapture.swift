@@ -68,6 +68,49 @@ public final class ScreenCapture: @unchecked Sendable {
         )
     }
 
+    /// Headless capture: grab a specific app's window by PID, independent of any
+    /// display. Like the console capturing QEMU's off-screen framebuffer, this
+    /// reads the window's pixels directly from the window server — the window
+    /// never has to be visible on a real display, so a truly off-screen /
+    /// non-activated app is still fully capturable. This is what makes the
+    /// "never touches your desktop" isolation possible for native apps.
+    public func captureWindow(
+        pid: pid_t,
+        format: ImageFormat = .png,
+        jpegQuality: CGFloat = 0.85
+    ) async throws -> CaptureResult {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        // Pick the app's largest on-window-list window (its main content window).
+        let windows = content.windows
+            .filter { $0.owningApplication?.processID == pid }
+            .sorted { ($0.frame.width * $0.frame.height) > ($1.frame.width * $1.frame.height) }
+        guard let window = windows.first else {
+            throw DisplayError.captureFailed("No capturable window found for PID \(pid) yet")
+        }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = SCStreamConfiguration()
+        config.width = max(2, Int(window.frame.width))
+        config.height = max(2, Int(window.frame.height))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: config
+        )
+        let data = try encodeImage(image, format: format, quality: jpegQuality)
+        return CaptureResult(
+            displayID: 0,
+            imageData: data,
+            width: image.width,
+            height: image.height,
+            format: format,
+            capturedAt: Date()
+        )
+    }
+
     /// Save a capture to disk.
     public func saveToDisk(_ result: CaptureResult, path: String) throws {
         let url = URL(fileURLWithPath: path)

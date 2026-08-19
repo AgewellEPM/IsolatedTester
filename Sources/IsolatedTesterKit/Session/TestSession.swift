@@ -49,42 +49,36 @@ public final class TestSession: @unchecked Sendable {
 
     // MARK: - Session Lifecycle
 
-    /// Start a test session with an isolated virtual display.
-    /// Falls back to main display if virtual display creation fails.
+    /// Start a test session with an isolated virtual display. If display
+    /// creation fails, the session runs fully headless — there is NO path from
+    /// here to the user's real display.
     public func start(
         appURL: URL,
-        displayConfig: VirtualDisplayManager.DisplayConfig = .init(),
-        fallbackToMainDisplay: Bool = true
+        displayConfig: VirtualDisplayManager.DisplayConfig = .init()
     ) async throws -> SessionState {
-        // 1. Try to create isolated virtual display
-        let managedDisplay: VirtualDisplayManager.ManagedDisplay
+        // HEADLESS MODEL (the console's isolation, for native apps): the app is
+        // launched non-activating + moved off every physical display, and we
+        // read its pixels by WINDOW capture — so it never touches the user's
+        // desktop. A virtual display is best-effort (some apps render nicer with
+        // one) but NOT required. The former fallbackToMainDisplay option was
+        // removed after it silently hijacked the live desktop (2026-08-18):
+        // isolation degrades to headless, never to the user's screen.
+        var displayID: CGDirectDisplayID = 0
         do {
-            managedDisplay = try await displayManager.createDisplay(config: displayConfig)
-            ISTLogger.session.info("Created virtual display: \(managedDisplay.displayID)")
+            let managedDisplay = try await displayManager.createDisplay(config: displayConfig)
+            self.display = managedDisplay
+            displayID = managedDisplay.displayID
+            ISTLogger.session.info("Created virtual display: \(displayID)")
         } catch {
-            if fallbackToMainDisplay {
-                ISTLogger.session.info("Virtual display unavailable, using main display: \(error.localizedDescription)")
-                managedDisplay = displayManager.useMainDisplay()
-            } else {
-                throw error
-            }
+            ISTLogger.session.info("No virtual display (\(error.localizedDescription)); running fully headless via window capture")
         }
-        self.display = managedDisplay
 
-        // 2. Launch app on that display
-        let launchedApp = try await launcher.launchApp(
-            at: appURL,
-            displayID: managedDisplay.displayID
-        )
+        let launchedApp = try await launcher.launchApp(at: appURL, displayID: displayID)
         self.app = launchedApp
 
-        // 3. Create input controller targeting the display + process
-        self.input = InputController(
-            displayID: managedDisplay.displayID,
-            targetPID: launchedApp.pid
-        )
+        self.input = InputController(displayID: displayID, targetPID: launchedApp.pid)
 
-        // 4. Wait for initial render
+        // Wait for the app's first window to exist (so capture + off-screen move land).
         try await Task.sleep(nanoseconds: 1_000_000_000)
 
         return state
@@ -285,6 +279,12 @@ public final class TestSession: @unchecked Sendable {
 
     /// Take a screenshot of the current state.
     public func screenshot(format: ScreenCapture.ImageFormat = .png) async throws -> ScreenCapture.CaptureResult {
+        // Headless: capture the app's WINDOW directly (works off-screen), so we
+        // never depend on a visible display. Fall back to display capture only
+        // if a display was actually established and there's no app pid.
+        if let pid = app?.pid {
+            return try await capture.captureWindow(pid: pid, format: format)
+        }
         guard let displayID = display?.displayID else {
             throw SessionError.noActiveSession
         }

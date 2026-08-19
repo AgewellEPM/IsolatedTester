@@ -1,11 +1,19 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
 
-/// Launches applications on a specific virtual display.
-/// Manages app lifecycle: launch, activate, terminate, force-quit.
+/// Launches applications HEADLESS — non-activating and off every physical
+/// display — so they never touch the user's desktop (the console's isolation
+/// model, applied to native macOS apps). Pixels are read via window capture,
+/// so the app never needs to be visible.
 public final class AppLauncher: @unchecked Sendable {
+
+    /// A coordinate beyond any realistic display arrangement. Windows moved here
+    /// are composited by the window server (so window-capture still works) but
+    /// are never on a screen the user sees.
+    static let offscreenOrigin = CGPoint(x: 200_000, y: 200_000)
 
     public struct LaunchedApp: Sendable {
         public let pid: pid_t
@@ -27,104 +35,70 @@ public final class AppLauncher: @unchecked Sendable {
 
     // MARK: - Launch
 
-    /// Launch an app bundle (.app) targeted at a specific display.
+    /// Launch an app bundle (.app) HEADLESS: non-activating (never steals focus
+    /// or switches the user's Space) and moved off every physical display.
     public func launchApp(
         at appURL: URL,
         displayID: CGDirectDisplayID,
         arguments: [String] = [],
         environment: [String: String] = [:]
     ) async throws -> LaunchedApp {
-        // Use /usr/bin/open which works reliably from CLI without NSApplication run loop
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        // Use standardizedFileURL to resolve symlinks, then .path for the actual filesystem path
-        let resolvedPath = appURL.standardizedFileURL.path
-        var args = ["-g", "-a", resolvedPath]
-        if !arguments.isEmpty {
-            args.append("--args")
-            args.append(contentsOf: arguments)
-        }
-        process.arguments = args
-        ISTLogger.launcher.debug("Launching app via /usr/bin/open: \(resolvedPath)")
+        // Record the user's frontmost app so we can PROVE we never stole focus.
+        let frontmostBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
-        // Merge environment if needed
-        if !environment.isEmpty {
-            var env = ProcessInfo.processInfo.environment
-            for (key, value) in environment {
-                env[key] = value
-            }
-            process.environment = env
-        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false            // never bring to the foreground / switch Space
+        config.addsToRecentItems = false
+        config.createsNewApplicationInstance = false
+        if !arguments.isEmpty { config.arguments = arguments }
+        if !environment.isEmpty { config.environment = environment }
 
-        // Use async-safe process execution — set handler before run to avoid race.
-        // Capture any launch error via the continuation's return value so it can be
-        // re-thrown after the continuation completes (withCheckedContinuation cannot
-        // itself be throwing, so we smuggle the error out as an optional).
-        let launchError: Error? = await withCheckedContinuation { (continuation: CheckedContinuation<Error?, Never>) in
-            process.terminationHandler = { _ in
-                // Process exited normally; no launch error.
-                continuation.resume(returning: nil)
-            }
-            do {
-                try process.run()
-            } catch {
-                // Resume immediately with the error; the termination handler will
-                // never fire for a process that never started.
-                continuation.resume(returning: error)
+        let runningApp: NSRunningApplication = try await withCheckedThrowingContinuation { cont in
+            NSWorkspace.shared.openApplication(at: appURL, configuration: config) { app, error in
+                if let app {
+                    cont.resume(returning: app)
+                } else {
+                    cont.resume(throwing: AppLaunchError.launchFailed(
+                        "NSWorkspace.openApplication failed: \(error?.localizedDescription ?? "no app returned")"))
+                }
             }
         }
 
-        if let error = launchError {
-            throw AppLaunchError.launchFailed("Failed to execute /usr/bin/open: \(error.localizedDescription)")
+        let pid = runningApp.processIdentifier
+        guard pid > 0 else {
+            throw AppLaunchError.launchFailed("Launched app has no valid PID")
         }
+        ISTLogger.launcher.info("App launched headless, PID: \(pid)")
 
-        // Get bundle ID from the app's Info.plist
-        var bundleID: String?
-        let infoPlistURL = appURL.appendingPathComponent("Contents/Info.plist")
-        if let plistData = try? Data(contentsOf: infoPlistURL),
-           let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any] {
-            bundleID = plist["CFBundleIdentifier"] as? String
-        }
-
-        // Find the running process using pgrep
-        let appName = appURL.deletingPathExtension().lastPathComponent
-        var pid: pid_t = 0
-
-        for attempt in 0..<30 { // 3 second timeout
-            // -n = newest process, -x = exact match — avoids picking wrong PID when multiple instances exist
-            let foundPID = await runProcess("/usr/bin/pgrep", arguments: ["-n", "-x", appName])
-            if let parsed = pid_t(foundPID), parsed > 0 {
-                pid = parsed
-                break
-            }
-
-            try? await Task.sleep(nanoseconds: attempt == 0 ? 200_000_000 : 100_000_000)
-        }
-
-        guard pid != 0 else {
-            throw AppLaunchError.launchFailed("App launched but process '\(appName)' not found after 3 seconds")
-        }
-        ISTLogger.launcher.info("App launched, PID: \(pid)")
-
-        // Cold-starting apps (Safari with session restore, Office, etc.) can take
-        // well over 3s to make their first window — wait up to 15s, and record the
-        // outcome instead of discarding it.
-        let placed = await moveAppToDisplay(pid: pid, displayID: displayID)
+        // Prefer a real isolated display. If this host cannot create one,
+        // displayID is zero and the window is moved beyond every physical
+        // display while direct window capture keeps it observable.
+        let placed = displayID == 0
+            ? await moveWindowsOffscreen(pid: pid)
+            : await moveAppToDisplay(pid: pid, displayID: displayID)
         if !placed {
             ISTLogger.launcher.error("App \(pid) never landed on display \(displayID) — session is NOT isolated")
         }
 
         let launched = LaunchedApp(
             pid: pid,
-            bundleID: bundleID,
+            bundleID: runningApp.bundleIdentifier,
             appURL: appURL,
             displayID: displayID,
             launchedAt: Date(),
             ownsProcess: true,
             windowsPlaced: placed
         )
-
         store(launched)
+
+        // Belt-and-suspenders: if the app somehow grabbed focus despite
+        // activates:false, hand focus straight back to where it was.
+        if let frontmostBefore,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+           let prior = NSRunningApplication(processIdentifier: frontmostBefore) {
+            prior.activate()
+            ISTLogger.launcher.info("Restored focus to prior frontmost app after headless launch")
+        }
 
         return launched
     }
@@ -139,7 +113,9 @@ public final class AppLauncher: @unchecked Sendable {
     /// first window appeared after launch-time placement gave up). Returns the
     /// updated placement state and records it.
     public func retryPlacement(pid: pid_t, displayID: CGDirectDisplayID) async -> Bool {
-        let placed = await moveAppToDisplay(pid: pid, displayID: displayID, maxWaitTicks: 20)
+        let placed = displayID == 0
+            ? await moveWindowsOffscreen(pid: pid, maxWaitTicks: 20)
+            : await moveAppToDisplay(pid: pid, displayID: displayID, maxWaitTicks: 20)
         if placed { markPlaced(pid: pid) }
         return placed
     }
@@ -203,6 +179,20 @@ public final class AppLauncher: @unchecked Sendable {
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
         return String(cString: buffer)
+    }
+
+    /// Move all of a process's windows off every physical display (best effort,
+    /// up to ~15s for the first window to appear).
+    private func moveWindowsOffscreen(pid: pid_t, maxWaitTicks: Int = 150) async -> Bool {
+        for _ in 0..<maxWaitTicks {
+            if let windows = getWindows(for: pid), !windows.isEmpty {
+                return windows.reduce(false) { moved, window in
+                    moveWindow(window, to: Self.offscreenOrigin) || moved
+                }
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
     }
 
     /// Launch an app by bundle identifier.

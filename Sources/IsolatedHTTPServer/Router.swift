@@ -184,11 +184,18 @@ final class Router: @unchecked Sendable {
             let request = try JSONDecoder().decode(CreateSessionRequest.self, from: body)
             let count = await sessionManager.activeSessionCount
             try RequestValidator.validate(request, activeSessionCount: count)
+            // Same contract as the MCP surface: the main-display fallback was
+            // removed after it hijacked the live desktop. Refuse an explicit
+            // true instead of silently running on the user's screen.
+            if request.fallbackToMainDisplay == true {
+                return .error(.badRequest,
+                    "fallbackToMainDisplay was removed: sessions never use the real display. "
+                    + "Isolation degrades to headless window-capture, not to the user's screen.")
+            }
             let response = try await sessionManager.createSession(
                 appPath: request.appPath,
                 displayWidth: request.displayWidth ?? 1920,
                 displayHeight: request.displayHeight ?? 1080,
-                fallbackToMainDisplay: request.fallbackToMainDisplay ?? true,
                 objective: request.objective
             )
             return jsonResponse(response, status: .created)
