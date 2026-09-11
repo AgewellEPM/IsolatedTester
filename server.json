@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.agewellepm/isolated-tester",
+  "description": "Vision and control for any model: drive macOS apps and VMs on isolated virtual displays over MCP",
+  "repository": {
+    "url": "https://github.com/AgewellEPM/IsolatedTester",
+    "source": "github"
+  },
+  "version": "1.2.0",
+  "websiteUrl": "https://github.com/AgewellEPM/IsolatedTester",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/AgewellEPM/IsolatedTester/releases/download/v1.2.0/isolated-tester-1.2.0.mcpb",
+      "fileSha256": "2306a80402f808aeac2dc5d6b290dbebe4db2c681c9e767100c25e6784e521aa",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
