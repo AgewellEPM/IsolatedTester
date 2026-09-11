@@ -629,9 +629,8 @@ public final class AITestAgent: @unchecked Sendable {
         case .type(let text):
             try session.type(text)
         case .keyPress(let key):
-            let keyCode = resolveKeyCode(key)
-            let modifiers = resolveModifiers(key)
-            try session.keyPress(keyCode, modifiers: modifiers)
+            let keyPress = try KeyCombination.parse(key: key)
+            try session.keyPress(keyPress.keyCode, modifiers: keyPress.modifiers)
         case .scroll(let deltaY, let deltaX):
             try session.scroll(deltaY: Int32(deltaY), deltaX: Int32(deltaX))
         case .drag(let fx, let fy, let tx, let ty):
@@ -641,30 +640,6 @@ public final class AITestAgent: @unchecked Sendable {
         case .done:
             break // Handled in run loop
         }
-    }
-
-    private func resolveKeyCode(_ key: String) -> CGKeyCode {
-        let baseKey = key.replacingOccurrences(of: "cmd+", with: "")
-            .replacingOccurrences(of: "shift+", with: "")
-            .replacingOccurrences(of: "alt+", with: "")
-            .replacingOccurrences(of: "ctrl+", with: "")
-
-        if let code = InputController.KeyCode.fromString(baseKey) {
-            return code
-        }
-
-        // Fallback: return 0 for truly unknown keys
-        ISTLogger.agent.warning("Unknown key code: \(baseKey), defaulting to 0")
-        return 0
-    }
-
-    private func resolveModifiers(_ key: String) -> CGEventFlags {
-        var flags: CGEventFlags = []
-        if key.contains("cmd+") { flags.insert(.maskCommand) }
-        if key.contains("shift+") { flags.insert(.maskShift) }
-        if key.contains("alt+") { flags.insert(.maskAlternate) }
-        if key.contains("ctrl+") { flags.insert(.maskControl) }
-        return flags
     }
 
     // MARK: - JSON Extraction

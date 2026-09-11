@@ -487,6 +487,10 @@ public actor SessionManager {
 
     /// Perform a UI action on a session.
     public func performAction(sessionId: String, action: ActionRequest) async throws {
+        // Direct callers (including MCP) must not bypass HTTP request validation.
+        // Resolve first: malformed chords cannot move a window or log an action.
+        let keyPress = action.action == "keyPress"
+            ? try KeyPressParser.parse(key: action.key, modifiers: action.modifiers) : nil
         guard let session = sessions[sessionId] else {
             throw ServerError.sessionNotFound(sessionId)
         }
@@ -505,19 +509,10 @@ public actor SessionManager {
         case "type":
             try session.type(action.text ?? "")
         case "keyPress":
-            if let keyName = action.key, let code = InputController.KeyCode.fromString(keyName) {
-                var flags: CGEventFlags = []
-                for mod in action.modifiers ?? [] {
-                    switch mod.lowercased() {
-                    case "command", "cmd": flags.insert(.maskCommand)
-                    case "shift": flags.insert(.maskShift)
-                    case "option", "alt": flags.insert(.maskAlternate)
-                    case "control", "ctrl": flags.insert(.maskControl)
-                    default: break
-                    }
-                }
-                try session.keyPress(code, modifiers: flags)
+            guard let keyPress else {
+                throw ServerError.invalidRequest("keyPress requires a validated key")
             }
+            try session.keyPress(keyPress.keyCode, modifiers: keyPress.modifiers)
         case "scroll":
             try session.scroll(deltaY: Int32(action.deltaY ?? 0), deltaX: Int32(action.deltaX ?? 0))
         case "drag":

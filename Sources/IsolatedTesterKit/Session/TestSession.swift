@@ -316,7 +316,7 @@ public final class TestSession: @unchecked Sendable {
     public func keyPress(_ keyCode: CGKeyCode, modifiers: CGEventFlags = []) throws {
         guard let input = input else { throw SessionError.noActiveSession }
         try input.keyPress(keyCode, modifiers: modifiers)
-        logAction("keyPress", details: "key=\(keyCode)")
+        logAction("keyPress", details: "key=\(keyCode) modifiers=\(modifiers.rawValue)")
     }
 
     /// Scroll.

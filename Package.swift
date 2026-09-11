@@ -60,6 +60,10 @@ let package = Package(
             dependencies: ["IsolatedServerCore", "IsolatedTesterKit"]
         ),
         .testTarget(
+            name: "IsolatedMCPServerTests",
+            dependencies: ["IsolatedMCPServer", "IsolatedServerCore"]
+        ),
+        .testTarget(
             name: "IsolatedHTTPServerTests",
             dependencies: [
                 "IsolatedServerCore",

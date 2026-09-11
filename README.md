@@ -251,6 +251,17 @@ See [SECURITY.md](SECURITY.md) for the full security policy.
 - Session timeouts to prevent resource leaks
 - API keys stored securely in macOS Keychain
 
+## Privacy Policy
+
+See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
+
+**Key points:**
+- Local-first: all captures and reports are owner-private files on your machine
+- No telemetry, no analytics, no developer-operated servers — we never see your data
+- Only `run_test` sends session screenshots to the AI provider **you** configure, with **your** API key
+- Captures come only from apps/VMs you explicitly launch in isolated sessions — never your real desktop
+- You control retention; delete local data directories or run `./uninstall.sh` at any time
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.

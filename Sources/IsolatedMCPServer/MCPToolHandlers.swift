@@ -89,6 +89,7 @@ final class MCPToolHandlers {
             tool("key_press", "Press a key with optional modifiers", [
                 param("sessionId", "string", "Session ID", required: true),
                 param("key", "string", "Key name (e.g., return, tab, cmd+c)", required: true),
+                param("modifiers", "array", "Optional host modifiers: cmd/command, shift, alt/option, ctrl/control; merged with key combination", items: ["type": "string"]),
             ]),
             tool("scroll", "Scroll the view", [
                 param("sessionId", "string", "Session ID", required: true),
@@ -287,10 +288,11 @@ final class MCPToolHandlers {
                 result = "{\"success\": true}"
 
             case "key_press":
+                let action = try KeyPressParser.action(arguments: args)
                 if let blocked = await substrateBlock(args) { return blocked }
                 try await sessionManager.performAction(
                     sessionId: args["sessionId"] as? String ?? "",
-                    action: ActionRequest(action: "keyPress", key: args["key"] as? String)
+                    action: action
                 )
                 result = "{\"success\": true}"
 
@@ -431,6 +433,57 @@ final class MCPToolHandlers {
         return nil
     }
 
+    /// MCP tool annotations (spec 2025-03-26+): title + behavior hints per tool.
+    /// Required by the Anthropic directory review — every tool must carry a title
+    /// and a readOnlyHint or destructiveHint. Keyed by tool name; the tool()
+    /// builder attaches the entry, and MCPToolAnnotationTests pins one assertion
+    /// per tool so a new tool without an entry fails CI by name.
+    static let toolAnnotations: [String: [String: Any]] = [
+        // Session lifecycle
+        "create_session":         ["title": "Create Test Session", "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false],
+        "attach_vm_session":      ["title": "Attach VM Session", "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false],
+        "set_objective":          ["title": "Set Session Objective", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "stop_session":           ["title": "Stop Session", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false],
+        "list_sessions":          ["title": "List Sessions", "readOnlyHint": true, "openWorldHint": false],
+
+        // AI-driven testing (run_test calls an external AI provider → open world)
+        "run_test":               ["title": "Run AI Test", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true],
+        "cancel_test":            ["title": "Cancel Test", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "get_test_report":        ["title": "Get Test Report", "readOnlyHint": true, "openWorldHint": false],
+
+        // Observation (capture writes owner-private local files, never touches the app under test)
+        "screenshot":             ["title": "Capture Screenshot", "readOnlyHint": true, "openWorldHint": false],
+        "session_frame":          ["title": "Export Session Frame", "readOnlyHint": true, "openWorldHint": false],
+        "frame_history":          ["title": "Frame History", "readOnlyHint": true, "openWorldHint": false],
+        "ocr_frame":              ["title": "OCR Frame", "readOnlyHint": true, "openWorldHint": false],
+        "ascii_frame":            ["title": "ASCII Frame View", "readOnlyHint": true, "openWorldHint": false],
+        "start_recording":        ["title": "Start Recording", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "stop_recording":         ["title": "Pause Recording", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "seal_session":           ["title": "Seal Evidence Chain", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "flipbook_export":        ["title": "Export Flipbook", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "session_report":         ["title": "Session Report", "readOnlyHint": true, "openWorldHint": false],
+        "trend_report":           ["title": "Trend Report", "readOnlyHint": true, "openWorldHint": false],
+
+        // Input actions — drive the app under test; arbitrary UI actions can destroy state
+        "click":                  ["title": "Click", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false],
+        "click_element":          ["title": "Click Element", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false],
+        "type_text":              ["title": "Type Text", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false],
+        "key_press":              ["title": "Press Key", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false],
+        "scroll":                 ["title": "Scroll", "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false],
+        "drag":                   ["title": "Drag", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false],
+
+        // Accessibility inspection
+        "get_accessibility_tree": ["title": "Accessibility Tree", "readOnlyHint": true, "openWorldHint": false],
+        "get_interactive_elements": ["title": "Interactive Elements", "readOnlyHint": true, "openWorldHint": false],
+        "find_element":           ["title": "Find Element", "readOnlyHint": true, "openWorldHint": false],
+
+        // Environment / permissions
+        "list_displays":          ["title": "List Displays", "readOnlyHint": true, "openWorldHint": false],
+        "check_permissions":      ["title": "Check Permissions", "readOnlyHint": true, "openWorldHint": false],
+        "request_permissions":    ["title": "Request macOS Permissions", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        "setup_status":           ["title": "Setup Status", "readOnlyHint": true, "openWorldHint": false],
+    ]
+
     private func tool(_ name: String, _ description: String, _ properties: [[String: Any]]) -> [String: Any] {
         var props: [String: Any] = [:]
         var required: [String] = []
@@ -438,6 +491,7 @@ final class MCPToolHandlers {
             let pName = p["name"] as! String
             var schema: [String: Any] = ["type": p["type"] as! String]
             if let desc = p["description"] as? String { schema["description"] = desc }
+            if let items = p["items"] as? [String: Any] { schema["items"] = items }
             props[pName] = schema
             if p["required"] as? Bool == true { required.append(pName) }
         }
@@ -450,6 +504,9 @@ final class MCPToolHandlers {
                 "properties": props,
             ]
         ]
+        if let annotations = Self.toolAnnotations[name] {
+            result["annotations"] = annotations
+        }
         if !required.isEmpty {
             var schema = result["inputSchema"] as! [String: Any]
             schema["required"] = required
@@ -458,8 +515,10 @@ final class MCPToolHandlers {
         return result
     }
 
-    private func param(_ name: String, _ type: String, _ description: String, required: Bool = false) -> [String: Any] {
-        ["name": name, "type": type, "description": description, "required": required]
+    private func param(_ name: String, _ type: String, _ description: String, required: Bool = false, items: [String: Any]? = nil) -> [String: Any] {
+        var result: [String: Any] = ["name": name, "type": type, "description": description, "required": required]
+        if let items { result["items"] = items }
+        return result
     }
 
     private func encode<T: Encodable>(_ value: T) -> String {

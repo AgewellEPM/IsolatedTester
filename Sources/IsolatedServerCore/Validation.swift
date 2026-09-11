@@ -141,9 +141,7 @@ public struct RequestValidator {
                 throw ServerError.invalidRequest("type requires text parameter")
             }
         case "keyPress":
-            guard action.key != nil else {
-                throw ServerError.invalidRequest("keyPress requires key parameter")
-            }
+            _ = try KeyPressParser.parse(key: action.key, modifiers: action.modifiers)
         case "drag":
             guard action.fromX != nil && action.fromY != nil && action.toX != nil && action.toY != nil else {
                 throw ServerError.invalidRequest("drag requires fromX, fromY, toX, and toY coordinates")

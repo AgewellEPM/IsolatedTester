@@ -192,40 +192,216 @@ public final class VirtualDisplayManager: @unchecked Sendable {
 
         ISTLogger.display.info("Created virtual display \(displayIDValue)")
 
-        // Arrange the new display corner-diagonal to the main display. Left to
-        // WindowServer's default edge-adjacent placement, the user's REAL
-        // cursor can slide off a shared edge into the invisible display and
-        // vanish ("trapped and couldn't get out", 2026-08-18). Corner
-        // adjacency is a valid arrangement with no shared edge to cross.
-        // Best-effort: a failure leaves default adjacency, which is
-        // survivable but leaky — so it's logged, not fatal.
-        cornerPin(displayID: displayIDValue)
-
+        // Register BEFORE the corner-pin and mirror check so a violation can
+        // tear the display down through the normal destroyDisplay path —
+        // releasing the strong ObjC ref is what actually removes the virtual
+        // display from WindowServer.
         lock.lock()
         displays[displayIDValue] = managed
         virtualDisplayObjects[displayIDValue] = displayObj // Keep alive!
         lock.unlock()
 
+        // Arrange the new display corner-diagonal to the ENTIRE existing
+        // arrangement. Left to WindowServer's default edge-adjacent placement,
+        // the user's REAL cursor can slide off a shared edge into the
+        // invisible display and vanish ("trapped and couldn't get out",
+        // 2026-08-18). Corner adjacency is a valid arrangement with no shared
+        // edge to cross. Best-effort: a failure leaves default adjacency,
+        // which is survivable but leaky — so it's logged, not fatal.
+        cornerPin(displayID: displayIDValue)
+
+        // Post-create mirror invariant: macOS may AUTO-MIRROR on
+        // CGVirtualDisplay creation (GhostBridge's equivalent code observed
+        // creation auto-mirroring its display). A mirrored REAL panel is a
+        // desktop takeover, so every create verifies, heals, or refuses —
+        // this is NOT best-effort.
+        try enforcePostCreateMirrorInvariant(virtualDisplayID: displayIDValue)
+
         return managed
     }
 
-    /// Pin a display's origin to the main display's bottom-right corner so the
-    /// two share only a corner point, not an edge the cursor can cross.
+    /// Pin a display's origin to the bottom-right corner of the UNION of every
+    /// OTHER online display, so the new display shares only a corner point —
+    /// never an edge — with ANY display in the arrangement.
+    ///
+    /// Why the union and NOT CGMainDisplayID() (live-fire, 2026-08-25): with
+    /// the GhostBridge half-screen workspace active, its virtual display is
+    /// main at (0,0) and the physical panel is parked to its right. Pinning
+    /// relative to the main display's bounds dropped the tester display
+    /// inside/adjacent to the parked panel's slot, and the resulting
+    /// reconfiguration killed the workspace (presentation_health=failed
+    /// reason=display_reconfiguration). On a single-display desktop the union
+    /// IS the main display's bounds, so the original intent is unchanged.
+    ///
+    /// The pin is also VERIFIED: WindowServer may normalize the requested
+    /// arrangement, silently turning corner adjacency back into edge adjacency
+    /// (observed live: requested (1920,1080), landed edge-adjacent (1920,0)).
+    /// On mismatch the pin retries ONCE against a fresh union; if still wrong
+    /// it logs loudly but does NOT fail the session — visibility over refusal;
+    /// the mirror invariant below still guards against takeover.
+    ///
+    /// Greppable outcomes (one per run):
+    ///   cornerPin=applied origin=(x,y) union=(WxH) displays=N
+    ///   cornerPin=unverified origin=(x,y) requested=(x,y)
+    ///   cornerPin=skipped reason=...
+    ///   cornerPin=failed reason=...
     private func cornerPin(displayID: CGDirectDisplayID) {
-        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        for attempt in 1...2 {
+            // Union of every ONLINE display except the one being pinned.
+            // Online (not just active) so mirrored/sleeping panels still
+            // count — they occupy arrangement space and regain edges at wake.
+            // Recomputed per attempt: a normalization that moved the first
+            // pin may have moved other displays too.
+            let others = onlineDisplays().filter { $0 != displayID }
+            guard !others.isEmpty else {
+                ISTLogger.display.error(
+                    "cornerPin=skipped reason=no_other_displays display=\(displayID) — nothing to pin against")
+                return
+            }
+            let union = others.reduce(CGRect.null) { $0.union(CGDisplayBounds($1)) }
+            guard !union.isEmpty else {
+                // All bounds read back empty (displays went offline mid-census).
+                // Pinning at (0,0) would OVERLAP the main display — refuse.
+                ISTLogger.display.error(
+                    "cornerPin=skipped reason=empty_union display=\(displayID) — keeps default adjacency")
+                return
+            }
+            let target = CGPoint(x: union.maxX, y: union.maxY)
+
+            guard applyOrigin(displayID: displayID, target: target) else {
+                return // applyOrigin logged the failure loudly
+            }
+
+            // Verify the pin actually stuck — never trust the transaction's
+            // return code alone.
+            let actual = CGDisplayBounds(displayID).origin
+            if abs(actual.x - target.x) <= 1, abs(actual.y - target.y) <= 1 {
+                ISTLogger.display.info(
+                    "cornerPin=applied origin=(\(Int(actual.x)),\(Int(actual.y))) union=(\(Int(union.width))x\(Int(union.height))) displays=\(others.count) attempt=\(attempt)")
+                return
+            }
+            if attempt == 2 {
+                ISTLogger.display.error(
+                    "cornerPin=unverified origin=(\(Int(actual.x)),\(Int(actual.y))) requested=(\(Int(target.x)),\(Int(target.y))) union=(\(Int(union.width))x\(Int(union.height))) displays=\(others.count) — WindowServer normalized the arrangement; display \(displayID) may be edge-adjacent")
+            }
+        }
+    }
+
+    /// One display-configuration transaction moving `displayID`'s origin to
+    /// `target`. Returns true when the transaction COMMITTED — not that the
+    /// origin stuck. Callers must verify by re-reading CGDisplayBounds.
+    private func applyOrigin(displayID: CGDirectDisplayID, target: CGPoint) -> Bool {
         var configRef: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&configRef) == .success, let configRef else {
-            ISTLogger.display.error("Corner-pin: CGBeginDisplayConfiguration failed — display \(displayID) keeps default adjacency")
+            ISTLogger.display.error(
+                "cornerPin=failed reason=begin_configuration display=\(displayID) — keeps default adjacency")
+            return false
+        }
+        CGConfigureDisplayOrigin(configRef, displayID, Int32(target.x), Int32(target.y))
+        let result = CGCompleteDisplayConfiguration(configRef, .forSession)
+        guard result == .success else {
+            ISTLogger.display.error(
+                "cornerPin=failed reason=complete_configuration code=\(result.rawValue) display=\(displayID) — keeps default adjacency")
+            return false
+        }
+        return true
+    }
+
+    // MARK: - Post-create mirror invariant
+
+    /// Our private virtual displays are stamped vendor 505 / product 0 in the
+    /// descriptor above. Any online display NOT carrying that stamp is the
+    /// user's REAL hardware.
+    private func isOwnVirtualDisplay(_ id: CGDirectDisplayID) -> Bool {
+        CGDisplayVendorNumber(id) == 505 && CGDisplayModelNumber(id) == 0
+    }
+
+    /// Every display currently online (active, mirrored, or sleeping).
+    /// Mirror members drop OUT of the active list, so the online list is the
+    /// only honest census for mirror auditing.
+    private func onlineDisplays() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetOnlineDisplayList(count, &ids, &count)
+        return Array(ids.prefix(Int(count)))
+    }
+
+    /// REAL displays currently violating the mirror invariant relative to the
+    /// new virtual display: in a mirror set involving it, or — for the real
+    /// main panel — mirroring anything at all.
+    private func mirrorViolatingRealDisplays(virtualDisplayID: CGDirectDisplayID) -> [CGDirectDisplayID] {
+        let realDisplays = onlineDisplays().filter { !isOwnVirtualDisplay($0) }
+        let virtualMirrors = CGDisplayMirrorsDisplay(virtualDisplayID)
+        let virtualInSet = CGDisplayIsInMirrorSet(virtualDisplayID) != 0
+        return realDisplays.filter { real in
+            let realMirrors = CGDisplayMirrorsDisplay(real)
+            let involvedWithVirtual =
+                realMirrors == virtualDisplayID     // real panel mirrors the virtual display
+                || virtualMirrors == real           // virtual display mirrors the real panel
+                || (virtualInSet && CGDisplayIsInMirrorSet(real) != 0
+                    && CGDisplayPrimaryDisplay(real) == CGDisplayPrimaryDisplay(virtualDisplayID))
+            let mainPanelMirroring = real == CGMainDisplayID() && realMirrors != kCGNullDirectDisplay
+            return involvedWithVirtual || mainPanelMirroring
+        }
+    }
+
+    /// Verify no REAL display was pulled into a mirror set by creating the
+    /// virtual display. On violation: heal in ONE display-configuration
+    /// transaction, re-check, and if still mirrored destroy the virtual
+    /// display and throw — creating a session must NEVER be allowed to keep
+    /// the user's panel mirrored.
+    ///
+    /// Greppable outcomes (one per run):
+    ///   postCreateMirrorCheck=clean
+    ///   postCreateMirrorCheck=violation_detected  (+ _healed or _unhealed)
+    private func enforcePostCreateMirrorInvariant(virtualDisplayID: CGDirectDisplayID) throws {
+        let affected = mirrorViolatingRealDisplays(virtualDisplayID: virtualDisplayID)
+        if affected.isEmpty {
+            ISTLogger.display.debug("postCreateMirrorCheck=clean virtualDisplay=\(virtualDisplayID)")
             return
         }
-        CGConfigureDisplayOrigin(configRef, displayID,
-                                 Int32(mainBounds.maxX), Int32(mainBounds.maxY))
-        let result = CGCompleteDisplayConfiguration(configRef, .forSession)
-        if result == .success {
-            ISTLogger.display.info("Corner-pinned display \(displayID) at (\(Int(mainBounds.maxX)), \(Int(mainBounds.maxY)))")
+
+        let affectedList = affected.map { String($0) }.joined(separator: ",")
+        ISTLogger.display.error(
+            "postCreateMirrorCheck=violation_detected realDisplays=\(affectedList, privacy: .public) mirrored after creating virtual display \(virtualDisplayID) — unmirroring now")
+
+        // One transaction: unmirror every affected real display, and the
+        // virtual display itself if it joined a set (breaking a set where the
+        // virtual member mirrors a real primary requires unmirroring the
+        // virtual member, not the primary).
+        var configRef: CGDisplayConfigRef?
+        if CGBeginDisplayConfiguration(&configRef) == .success, let configRef {
+            for real in affected {
+                CGConfigureDisplayMirrorOfDisplay(configRef, real, kCGNullDirectDisplay)
+            }
+            if CGDisplayMirrorsDisplay(virtualDisplayID) != kCGNullDirectDisplay
+                || CGDisplayIsInMirrorSet(virtualDisplayID) != 0 {
+                CGConfigureDisplayMirrorOfDisplay(configRef, virtualDisplayID, kCGNullDirectDisplay)
+            }
+            let result = CGCompleteDisplayConfiguration(configRef, .forSession)
+            if result != .success {
+                ISTLogger.display.error("postCreateMirrorCheck unmirror transaction failed (\(result.rawValue))")
+            }
         } else {
-            ISTLogger.display.error("Corner-pin failed (\(result.rawValue)) — display \(displayID) keeps default adjacency")
+            ISTLogger.display.error("postCreateMirrorCheck: CGBeginDisplayConfiguration failed — cannot unmirror")
         }
+
+        // Re-check: healing must be proven, not assumed.
+        let stillMirrored = mirrorViolatingRealDisplays(virtualDisplayID: virtualDisplayID)
+        guard stillMirrored.isEmpty else {
+            let stillList = stillMirrored.map { String($0) }.joined(separator: ",")
+            ISTLogger.display.error(
+                "postCreateMirrorCheck=violation_unhealed realDisplays=\(stillList, privacy: .public) still mirrored — destroying virtual display \(virtualDisplayID)")
+            destroyDisplay(id: virtualDisplayID)
+            throw DisplayError.creationFailed(
+                "Post-create mirror invariant violated and unmirror FAILED: real display(s) [\(stillList)] "
+                + "remain in a mirror set after creating virtual display \(virtualDisplayID). "
+                + "The virtual display was destroyed; run gb-restore to restore your display layout."
+            )
+        }
+        ISTLogger.display.info(
+            "postCreateMirrorCheck=violation_healed unmirrored realDisplays=\(affectedList, privacy: .public)")
     }
 
     /// Check if CGVirtualDisplay is available on this system.
@@ -269,31 +445,10 @@ public final class VirtualDisplayManager: @unchecked Sendable {
         return managed
     }
 
-    /// Use an existing secondary display (external monitor, existing virtual display).
-    public func useSecondaryDisplay(config: DisplayConfig = .init()) throws -> ManagedDisplay {
-        let activeDisplays = getActiveDisplays()
-        guard let secondary = activeDisplays.first(where: { $0 != CGMainDisplayID() }) else {
-            throw DisplayError.creationFailed(
-                "No secondary display found. Options:\n" +
-                "  1. Connect an external monitor\n" +
-                "  2. Use BetterDisplay to create a virtual display\n" +
-                "  3. Use --display 0 to test on the main display (not isolated)"
-            )
-        }
-
-        let managed = ManagedDisplay(
-            displayID: secondary,
-            config: config,
-            createdAt: Date(),
-            isVirtual: false
-        )
-
-        lock.lock()
-        displays[secondary] = managed
-        lock.unlock()
-
-        return managed
-    }
+    // NOTE: useSecondaryDisplay() was removed 2026-08-25. It was dead public
+    // API with zero callers that could register a REAL display (external
+    // monitor / foreign virtual display) as a test surface — the exact
+    // takeover shape the 2026-08-18 incident fixed elsewhere.
 
     // MARK: - Destroy
 
