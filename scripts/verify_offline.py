@@ -84,6 +84,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--binary', default=str(Path.home()/'.local/bin/isolated-mcp'))
     parser.add_argument('--tinky-server', default=str(Path.home()/'tinky-vision-mcp/src/server.mjs'))
+    parser.add_argument('--unified-server', type=Path,
+                        help='Verify one combined IsolatedTester/TinkyVision/TinkyStream MCP connection')
     parser.add_argument('--diagnose-with-network', action='store_true',
                         help='Diagnose OS capture without the extra network sandbox; not offline proof')
     args = parser.parse_args()
@@ -94,13 +96,24 @@ def main():
         raise RuntimeError('Existing Calculator/guest process; refusing duplicate or borrowed app')
     result = {'status': 'FAIL', 'network_policy': 'deny IP network traffic for both MCP servers and inherited helpers; local OS IPC allowed',
               'binary': args.binary, 'binary_sha256': hashlib.sha256(Path(args.binary).read_bytes()).hexdigest()}
+    if args.unified_server:
+        result['unified_server'] = str(args.unified_server)
+        result['unified_server_sha256'] = hashlib.sha256(args.unified_server.read_bytes()).hexdigest()
+        result['mcp_connections'] = 1
     if args.diagnose_with_network: result['network_policy'] = 'unrestricted diagnostic; offline not proven'
     isolated = vision = None
     session = None
     try:
-        isolated = MCP([args.binary], args.out, 'isolated', not args.diagnose_with_network)
-        vision = MCP(['/opt/homebrew/bin/node', args.tinky_server], args.out, 'tinky', not args.diagnose_with_network)
+        command = ['/opt/homebrew/bin/node', str(args.unified_server)] if args.unified_server else [args.binary]
+        isolated = MCP(command, args.out, 'unified' if args.unified_server else 'isolated', not args.diagnose_with_network)
+        vision = isolated if args.unified_server else MCP(['/opt/homebrew/bin/node', args.tinky_server], args.out, 'tinky', not args.diagnose_with_network)
         result['setup'] = isolated.tool('setup_status')
+        if args.unified_server:
+            names = {t['name'] for t in isolated.request('tools/list')['tools']}
+            if not {'create_session', 'vision_find_text', 'portal_snapshot', 'observe_session', 'stream_status'} <= names:
+                raise RuntimeError('Combined MCP did not expose the integrated tools')
+            if not result['setup']['components']['tinkyStream']['running']:
+                raise RuntimeError('Combined MCP did not bring up TinkyStream')
         result['displays_before'] = isolated.tool('list_displays')
         if isolated.tool('list_sessions'): raise RuntimeError('An isolated session is already active')
         session = isolated.tool('create_session', appPath='/System/Applications/Calculator.app',
@@ -119,12 +132,17 @@ def main():
             raise RuntimeError('A new local 1024x768 virtual monitor was not created')
         result['virtual_monitor_verified'] = True
         if not session['windowsPlaced']: raise RuntimeError('App was not isolated')
-        isolated.tool('key_press', sessionId=sid, key='escape')
-        isolated.tool('type_text', sessionId=sid, text='27+15=')
+        isolated.tool('os_key' if args.unified_server else 'key_press', sessionId=sid, key='escape')
+        isolated.tool('os_type' if args.unified_server else 'type_text', sessionId=sid, text='27+15=')
         # Wait for an actual rendered frame rather than assuming dispatch is synchronous.
         for _ in range(10):
-            frame = isolated.tool('session_frame', sessionId=sid)
-            ocr = vision.tool('vision_find_text', inPath=frame['path'])
+            if args.unified_server:
+                observed = isolated.tool('observe_session', sessionId=sid)
+                frame, ocr = observed['frame'], observed['vision']
+                result['observation'] = observed
+            else:
+                frame = isolated.tool('session_frame', sessionId=sid)
+                ocr = vision.tool('vision_find_text', inPath=frame['path'])
             if any(m['text'] == '42' for m in ocr['matches']): break
             time.sleep(0.5)
         else: raise RuntimeError('The captured Calculator result was not 42')
@@ -145,8 +163,8 @@ def main():
         # Use the screenshot's actual pixels, not global AX/display coordinates.
         # A subsequent 7+8 result distinguishes a delivered click from an ACK.
         seven = next(m['image_px'] for m in cleared_ocr['matches'] if m['text'] == '7')
-        isolated.tool('click', sessionId=sid, x=seven['cx'], y=seven['cy'])
-        isolated.tool('type_text', sessionId=sid, text='+8=')
+        isolated.tool('os_click' if args.unified_server else 'click', sessionId=sid, x=seven['cx'], y=seven['cy'])
+        isolated.tool('os_type' if args.unified_server else 'type_text', sessionId=sid, text='+8=')
         time.sleep(0.5)
         pointer_frame = isolated.tool('session_frame', sessionId=sid)
         pointer_ocr = vision.tool('vision_find_text', inPath=pointer_frame['path'])
@@ -170,6 +188,10 @@ def main():
             raise RuntimeError('Recorded evidence chain is broken')
         result['stream'] = vision.tool('portal_state')
         result['stream_snapshot'] = vision.tool('portal_snapshot', lane='full')
+        if args.unified_server:
+            result['stream_service'] = isolated.tool('stream_status')
+            if result['stream_service']['pid'] != result['setup']['components']['tinkyStream']['pid']:
+                raise RuntimeError('Combined MCP replaced the shared stream process')
         result['status'] = 'PASS'
     except Exception as error:
         result['error'] = str(error)
@@ -195,7 +217,7 @@ def main():
                 result['video_decoded'] = True
             except Exception as error:
                 result.update(status='FAIL', cleanup_error=str(error))
-        if vision: vision.close()
+        if vision and vision is not isolated: vision.close()
         if isolated: isolated.close()
         try:
             inventory = MCP([args.binary], args.out, 'cleanup-inventory', not args.diagnose_with_network)
