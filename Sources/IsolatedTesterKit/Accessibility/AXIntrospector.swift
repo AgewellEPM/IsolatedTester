@@ -51,6 +51,8 @@ public struct AXIntrospector: Sendable {
         var elementRef: AXUIElement?
         let result = AXUIElementCopyElementAtPosition(appRef, x, y, &elementRef)
         guard result == .success, let el = elementRef else { return false }
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(el, &owner) == .success, owner == pid else { return false }
         return AXUIElementPerformAction(el, action as CFString) == .success
     }
 

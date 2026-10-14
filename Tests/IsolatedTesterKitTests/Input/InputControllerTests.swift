@@ -146,4 +146,14 @@ final class InputControllerTests: XCTestCase {
     func testLargestWindowFrame_bogusPIDReturnsNil() {
         XCTAssertNil(InputController.largestWindowFrame(pid: 999_999))
     }
+
+    func testWindowCoordinates_neverFallBackToAnExistingDisplay() {
+        let controller = InputController(displayID: CGMainDisplayID(), targetPID: 999_999,
+                                         windowRelative: true)
+        XCTAssertThrowsError(try controller.toAbsolute(CGPoint(x: 33, y: 212))) { error in
+            guard case InputError.cannotGroundCoordinates = error else {
+                return XCTFail("missing target window must fail closed, got \(error)")
+            }
+        }
+    }
 }

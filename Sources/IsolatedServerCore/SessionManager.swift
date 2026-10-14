@@ -661,11 +661,10 @@ public actor SessionManager {
             throw ServerError.sessionNotFound(sessionId)
         }
         sessionLastActivity[sessionId] = Date()
-        guard let pid = session.state.appPID else {
+        guard session.state.appPID != nil else {
             throw ServerError.invalidRequest("No running app in session \(sessionId)")
         }
-        let introspector = AXIntrospector()
-        return introspector.performAction(pid: pid, x: Float(x), y: Float(y), action: action)
+        return try session.performElementAction(x: x, y: y, action: action)
     }
 
     // MARK: - System Info

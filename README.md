@@ -262,6 +262,57 @@ See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
 - Captures come only from apps/VMs you explicitly launch in isolated sessions — never your real desktop
 - You control retention; delete local data directories or run `./uninstall.sh` at any time
 
+## Local capture, control and recording verification
+
+Permission preflight (`setup_status`) does not prove that capture works. Verify a
+fresh installed `isolated-mcp` process with `session_frame` and observable input
+results. Native sessions use a virtual display or an off-screen window in the
+same macOS login; this is visual isolation, not a VM or a security sandbox.
+
+ScreenCaptureKit callbacks have cancellation-aware deadlines. If window content
+discovery or image capture stalls, the session switches to bounded native
+`screencapture -l WINDOW_ID` capture of the target PID's window. Screen Recording
+permission is still required; this fallback never captures the whole desktop.
+The first stalled request can take about ten seconds before fallback. Subsequent
+window captures reuse the working backend. Display-only capture reports its own
+timeout rather than widening the target.
+
+`session_frame` images and `click`/drag coordinates are relative to the app's
+largest normal window, including sessions with virtual displays. Accessibility
+`click_element` coordinates remain global. Use TinkyVision's local
+`vision_find_text(inPath: session_frame.path)` to read that exact frame; a physical
+TinkyStream snapshot is a separate observation and is not the isolated app frame.
+Single left clicks first try the target application's accessibility action at the
+grounded point, then use process-targeted mouse events for controls without one.
+The action receipt records the chosen path. An event dispatch acknowledgement
+does not establish that a canvas, game or VM accepted the input; observe its next
+frame. Those targets require their own live input validation.
+
+The existing recording loop captures at approximately 1 FPS into a 300-frame
+ring. `stop_session` finalizes `~/.isolated-tester/sessions/ID/session.mp4` and its
+metadata/receipts. The MP4 uses 6 FPS **playback**, so it is a timelapse. Pausing
+recording retains the ring; resuming continues it. Inspect fresh frames, the
+evidence chain and a decoded MP4 before reporting success.
+
+With Calculator closed, no other guest/test active, granted macOS permissions,
+installed TinkyVision helpers, Python 3, Node and ffmpeg available:
+
+```sh
+python3 scripts/verify_offline.py --out /private/tmp/isolated-offline-check
+```
+
+The script starts one disposable Calculator session using the installed MCP,
+checks typed arithmetic and screenshot-based clicking with local OCR, exercises
+pause/resume, verifies the receipt chain, decodes the finalized video, then checks
+app/display cleanup. It denies IP networking to its two MCP servers and inherited
+helpers while allowing local macOS IPC. It does not disable the host's network or
+sandbox apps launched by LaunchServices. Raw evidence stays in the chosen private
+output directory. `--diagnose-with-network` is diagnostic and is not offline proof.
+
+Existing editor MCP connections keep the old binary loaded until reconnected.
+`setup_status` exposes the server PID and executable path to identify the process.
+Do not terminate another connection's sessions while updating installed files.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.

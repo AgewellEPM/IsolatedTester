@@ -1,29 +1,13 @@
 import Foundation
-import ApplicationServices
-import CoreGraphics
 import IsolatedServerCore
 import IsolatedTesterKit
 
 @main
 struct IsolatedMCPServer {
     static func main() async {
-        // Register this exact MCP executable with macOS privacy controls on its
-        // first launch. TCC persists the operator's choices, so subsequent
-        // launches only perform the inexpensive preflight checks.
-        if !CGPreflightScreenCaptureAccess() {
-            FileHandle.standardError.write(Data(
-                "IsolatedTester needs Screen Recording access; approve the macOS prompt once.\n".utf8
-            ))
-            _ = CGRequestScreenCaptureAccess()
-        }
-        let accessibilityOptions = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true
-        ] as CFDictionary
-        if !AXIsProcessTrustedWithOptions(accessibilityOptions) {
-            FileHandle.standardError.write(Data(
-                "IsolatedTester needs Accessibility access; approve the macOS prompt once.\n".utf8
-            ))
-        }
+        // Inventory and protocol startup require no UI permissions. Consent is
+        // requested explicitly through request_permissions, never before stdin
+        // is serviced (a macOS consent dialog can wait indefinitely).
 
         // Advertise this MCP server process so editors can discover it automatically.
         // The discovery file is removed on exit via the defer block below.

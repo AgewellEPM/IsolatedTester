@@ -8,11 +8,13 @@ public final class InputController: @unchecked Sendable {
 
     public let displayID: CGDirectDisplayID
     public let targetPID: pid_t?
+    private let windowRelative: Bool
     private let eventSource: CGEventSource?
 
-    public init(displayID: CGDirectDisplayID, targetPID: pid_t? = nil) {
+    public init(displayID: CGDirectDisplayID, targetPID: pid_t? = nil, windowRelative: Bool = false) {
         self.displayID = displayID
         self.targetPID = targetPID
+        self.windowRelative = windowRelative
         self.eventSource = CGEventSource(stateID: .combinedSessionState)
     }
 
@@ -34,9 +36,17 @@ public final class InputController: @unchecked Sendable {
         try postEvent(event)
     }
 
-    /// Click at a position on the virtual display.
-    public func click(at point: CGPoint, button: CGMouseButton = .left, clickCount: Int = 1) throws {
+    /// Click at a grounded position. Native controls accept AXPress even when
+    /// their background window ignores synthetic mouse events.
+    @discardableResult
+    public func click(at point: CGPoint, button: CGMouseButton = .left, clickCount: Int = 1,
+                      preferAccessibility: Bool = true) throws -> String {
         let absolutePoint = try toAbsolute(point)
+        if preferAccessibility, button == .left, clickCount == 1, let pid = targetPID,
+           AXIntrospector().performAction(pid: pid, x: Float(absolutePoint.x),
+                                         y: Float(absolutePoint.y), action: "AXPress") {
+            return "accessibility"
+        }
 
         let downType: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
         let upType: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
@@ -65,11 +75,12 @@ public final class InputController: @unchecked Sendable {
         try postEvent(downEvent)
         usleep(50_000) // 50ms between down/up
         try postEvent(upEvent)
+        return "process-mouse-event"
     }
 
     /// Double-click at a position.
     public func doubleClick(at point: CGPoint) throws {
-        try click(at: point, clickCount: 1)
+        try click(at: point, clickCount: 1, preferAccessibility: false)
         usleep(100_000)
         try click(at: point, clickCount: 2)
     }
@@ -218,8 +229,10 @@ public final class InputController: @unchecked Sendable {
 
     // MARK: - Coordinate Translation
 
-    private func toAbsolute(_ point: CGPoint) throws -> CGPoint {
-        if displayID != 0 {
+    func toAbsolute(_ point: CGPoint) throws -> CGPoint {
+        // Session observations are window images even when a virtual display
+        // exists. Using the display origin shifts clicks by the window offset.
+        if !windowRelative && displayID != 0 {
             let displayBounds = CGDisplayBounds(displayID)
             if !displayBounds.isEmpty {
                 return CGPoint(
@@ -243,14 +256,19 @@ public final class InputController: @unchecked Sendable {
     /// origin) coordinates — the same space CGEvent positions use. Off-screen
     /// windows are included, which is what makes headless input land.
     static func largestWindowFrame(pid: pid_t) -> CGRect? {
+        largestWindow(pid: pid)?.frame
+    }
+
+    static func largestWindow(pid: pid_t) -> (id: CGWindowID, frame: CGRect)? {
         guard let info = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return nil }
-        var best: CGRect?
+        var best: (id: CGWindowID, frame: CGRect)?
         var bestArea: CGFloat = 0
         for entry in info {
             guard let owner = entry[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
                   let layer = entry[kCGWindowLayer as String] as? Int, layer == 0,
+                  let windowID = entry[kCGWindowNumber as String] as? CGWindowID,
                   let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
                   let x = bounds["X"], let y = bounds["Y"],
                   let width = bounds["Width"], let height = bounds["Height"],
@@ -259,7 +277,7 @@ public final class InputController: @unchecked Sendable {
             let area = width * height
             if area > bestArea {
                 bestArea = area
-                best = CGRect(x: x, y: y, width: width, height: height)
+                best = (windowID, CGRect(x: x, y: y, width: width, height: height))
             }
         }
         return best
@@ -279,6 +297,19 @@ public final class InputController: @unchecked Sendable {
         // process is how input silently vanished while reporting success.
         guard kill(pid, 0) == 0 else {
             throw InputError.targetNotFound(pid)
+        }
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .scrollWheel:
+            guard let window = Self.largestWindow(pid: pid) else {
+                throw InputError.cannotGroundCoordinates(displayID)
+            }
+            // postToPid bypasses WindowServer hit testing. Supply the actual
+            // window so a background/off-screen app can route the mouse event.
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.id))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+                                       value: Int64(window.id))
+        default: break
         }
         event.postToPid(pid)
     }

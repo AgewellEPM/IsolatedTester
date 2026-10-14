@@ -7,6 +7,17 @@ import UniformTypeIdentifiers
 /// Captures screenshots from a specific display using ScreenCaptureKit (macOS 14+).
 /// This is the Apple-recommended replacement for CGDisplayCreateImage.
 public final class ScreenCapture: @unchecked Sendable {
+    private let backendLock = NSLock()
+    private var nativeWindowFallback = false
+
+    private var useNativeWindowCapture: Bool {
+        backendLock.lock(); defer { backendLock.unlock() }
+        return nativeWindowFallback
+    }
+
+    private func selectNativeWindowCapture() {
+        backendLock.lock(); nativeWindowFallback = true; backendLock.unlock()
+    }
 
     public enum ImageFormat: String, Sendable {
         case png
@@ -36,7 +47,7 @@ public final class ScreenCapture: @unchecked Sendable {
     ) async throws -> CaptureResult {
         ISTLogger.capture.debug("Capturing display \(displayID) as \(format.rawValue)")
         // Get the SCDisplay matching our displayID
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await shareableContent(onScreenWindowsOnly: true)
 
         guard let scDisplay = content.displays.first(where: { $0.displayID == displayID }) else {
             throw DisplayError.captureFailed("Display \(displayID) not found in ScreenCaptureKit")
@@ -51,10 +62,7 @@ public final class ScreenCapture: @unchecked Sendable {
         config.showsCursor = true
 
         // Capture a single frame
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: config
-        )
+        let image = try await captureImage(filter: filter, configuration: config)
 
         let data = try encodeImage(image, format: format, quality: jpegQuality)
 
@@ -79,7 +87,25 @@ public final class ScreenCapture: @unchecked Sendable {
         format: ImageFormat = .png,
         jpegQuality: CGFloat = 0.85
     ) async throws -> CaptureResult {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        if !useNativeWindowCapture {
+            do {
+                return try await captureWindowWithScreenCaptureKit(pid: pid, format: format, jpegQuality: jpegQuality)
+            } catch is CaptureDeadlineError {
+                try Task.checkCancellation()
+                ISTLogger.capture.warning("ScreenCaptureKit stalled; trying bounded native capture for PID \(pid)")
+            }
+        }
+        let image = try await NativeWindowCapture.capture(pid: pid)
+        selectNativeWindowCapture()
+        return CaptureResult(displayID: 0,
+                             imageData: try encodeImage(image, format: format, quality: jpegQuality),
+                             width: image.width, height: image.height, format: format, capturedAt: Date())
+    }
+
+    private func captureWindowWithScreenCaptureKit(
+        pid: pid_t, format: ImageFormat, jpegQuality: CGFloat
+    ) async throws -> CaptureResult {
+        let content = try await shareableContent(onScreenWindowsOnly: false)
         // Pick the app's largest on-window-list window (its main content window).
         let windows = content.windows
             .filter { $0.owningApplication?.processID == pid }
@@ -96,10 +122,7 @@ public final class ScreenCapture: @unchecked Sendable {
         config.showsCursor = false
         config.ignoreShadowsSingleWindow = true
 
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: config
-        )
+        let image = try await captureImage(filter: filter, configuration: config)
         let data = try encodeImage(image, format: format, quality: jpegQuality)
         return CaptureResult(
             displayID: 0,
@@ -115,6 +138,31 @@ public final class ScreenCapture: @unchecked Sendable {
     public func saveToDisk(_ result: CaptureResult, path: String) throws {
         let url = URL(fileURLWithPath: path)
         try result.imageData.write(to: url)
+    }
+
+    private func shareableContent(onScreenWindowsOnly: Bool) async throws -> SCShareableContent {
+        try Task.checkCancellation()
+        guard CGPreflightScreenCaptureAccess() else {
+            throw DisplayError.captureFailed("Screen Recording is not granted. Call request_permissions before capturing.")
+        }
+        return try await CaptureDeadline<SCShareableContent>.wait(operationName: "ScreenCaptureKit content discovery") { completion in
+            SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: onScreenWindowsOnly) { content, error in
+                if let error { completion(.failure(error)) }
+                else if let content { completion(.success(content)) }
+                else { completion(.failure(DisplayError.captureFailed("ScreenCaptureKit returned no shareable content"))) }
+            }
+        }
+    }
+
+    private func captureImage(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws -> CGImage {
+        try Task.checkCancellation()
+        return try await CaptureDeadline<CGImage>.wait(operationName: "ScreenCaptureKit image capture") { completion in
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
+                if let error { completion(.failure(error)) }
+                else if let image { completion(.success(image)) }
+                else { completion(.failure(DisplayError.captureFailed("ScreenCaptureKit returned no image"))) }
+            }
+        }
     }
 
     // MARK: - Encoding

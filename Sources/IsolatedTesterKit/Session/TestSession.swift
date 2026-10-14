@@ -76,7 +76,7 @@ public final class TestSession: @unchecked Sendable {
         let launchedApp = try await launcher.launchApp(at: appURL, displayID: displayID)
         self.app = launchedApp
 
-        self.input = InputController(displayID: displayID, targetPID: launchedApp.pid)
+        self.input = InputController(displayID: displayID, targetPID: launchedApp.pid, windowRelative: true)
 
         // Wait for the app's first window to exist (so capture + off-screen move land).
         try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -99,7 +99,8 @@ public final class TestSession: @unchecked Sendable {
 
         self.input = InputController(
             displayID: managedDisplay.displayID,
-            targetPID: launchedApp.pid
+            targetPID: launchedApp.pid,
+            windowRelative: true
         )
 
         try await Task.sleep(nanoseconds: 500_000_000) // 0.5s for initial render
@@ -122,7 +123,8 @@ public final class TestSession: @unchecked Sendable {
             self.app = attachedApp
             self.input = InputController(
                 displayID: managedDisplay.displayID,
-                targetPID: attachedApp.pid
+                targetPID: attachedApp.pid,
+                windowRelative: true
             )
             try await Task.sleep(nanoseconds: 500_000_000)
             return state
@@ -294,8 +296,8 @@ public final class TestSession: @unchecked Sendable {
     /// Click at a position.
     public func click(x: Double, y: Double) throws {
         guard let input = input else { throw SessionError.noActiveSession }
-        try input.click(at: CGPoint(x: x, y: y))
-        logAction("click", details: "(\(Int(x)), \(Int(y)))")
+        let backend = try input.click(at: CGPoint(x: x, y: y))
+        logAction("click", details: "(\(Int(x)), \(Int(y))) via \(backend)")
     }
 
     /// Double-click at a position.
@@ -343,6 +345,15 @@ public final class TestSession: @unchecked Sendable {
     }
 
     // MARK: - State
+
+    /// Accessibility coordinates are global; retain the target PID boundary
+    /// and record successful actions alongside keyboard/pointer receipts.
+    public func performElementAction(x: Double, y: Double, action: String) throws -> Bool {
+        guard let pid = app?.pid else { throw SessionError.noActiveSession }
+        let success = AXIntrospector().performAction(pid: pid, x: Float(x), y: Float(y), action: action)
+        if success { logAction("accessibility", details: "\(action) at (\(x),\(y))") }
+        return success
+    }
 
     public var state: SessionState {
         // Hold the lock while reading display, app, and actionLog to prevent data
@@ -463,14 +474,17 @@ public final class TestSession: @unchecked Sendable {
                     break
                 }
                 do {
-                    // Even with the grant, race a deadline so a transient
-                    // ScreenCaptureKit stall can't wedge the loop.
-                    let shot = try await self.captureWithTimeout(seconds: 10)
+                    // Each ScreenCaptureKit callback has a cancellation-aware
+                    // deadline. Never append a late frame after stop/sealing.
+                    let shot = try await self.screenshot(format: .jpeg)
+                    try Task.checkCancellation()
                     _ = try store.record(shot.imageData, width: shot.width, height: shot.height)
                     // Encode into the movie at capture time (before eviction) so
                     // session.mp4 is the WHOLE run, not just the ring window.
                     self.videoRecorder?.append(imageData: shot.imageData)
                     consecutiveFailures = 0
+                } catch is CancellationError {
+                    break
                 } catch {
                     consecutiveFailures += 1
                     if consecutiveFailures >= 5 {
@@ -531,21 +545,6 @@ public final class TestSession: @unchecked Sendable {
         defer { lock.unlock() }
         frameHistoryError = message
         frameHistoryTask = nil
-    }
-
-    private func captureWithTimeout(seconds: Double) async throws -> ScreenCapture.CaptureResult {
-        try await withThrowingTaskGroup(of: ScreenCapture.CaptureResult.self) { group in
-            group.addTask { try await self.screenshot(format: .jpeg) }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw DisplayError.captureFailed("frame capture timed out after \(Int(seconds))s (likely no Screen Recording grant)")
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw DisplayError.captureFailed("frame capture produced no result")
-            }
-            return first
-        }
     }
 
     /// Self-heal: if the app's windows never landed on the isolated display at

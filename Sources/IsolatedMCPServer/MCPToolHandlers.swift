@@ -387,6 +387,10 @@ final class MCPToolHandlers {
                 let virtualDisplayAvailable = NSClassFromString("CGVirtualDisplayDescriptor") != nil
                 let status: [String: Any] = [
                     "version": IsolatedTesterVersion.current,
+                    "processID": ProcessInfo.processInfo.processIdentifier,
+                    "executablePath": CommandLine.arguments.first ?? "",
+                    "captureVerified": false,
+                    "captureNote": "Permission preflight only; verify fresh session frames before claiming capture works.",
                     "platform": "macOS",
                     "systemVersion": ProcessInfo.processInfo.operatingSystemVersionString,
                     "permissions": [
