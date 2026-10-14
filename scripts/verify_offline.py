@@ -108,6 +108,16 @@ def main():
                                 objective='Offline integration: typed 27+15=42, screenshot-clicked 7 then +8=15, local OCR, recording pause/resume, finalized video.')
         result['session'] = session
         sid = session['sessionId']
+        # Luke's intended setup is a second local virtual monitor. A working
+        # off-screen window fallback does not satisfy that specific criterion.
+        active_displays = isolated.tool('list_displays')
+        result['displays_during'] = active_displays
+        display = next((d for d in active_displays if d['displayID'] == session['displayID']), None)
+        if (not display or display['isMain'] or session['displayID'] == 0
+                or display['width'] != 1024 or display['height'] != 768
+                or any(d['displayID'] == session['displayID'] for d in result['displays_before'])):
+            raise RuntimeError('A new local 1024x768 virtual monitor was not created')
+        result['virtual_monitor_verified'] = True
         if not session['windowsPlaced']: raise RuntimeError('App was not isolated')
         isolated.tool('key_press', sessionId=sid, key='escape')
         isolated.tool('type_text', sessionId=sid, text='27+15=')
