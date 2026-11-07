@@ -270,9 +270,18 @@ public final class AppLauncher: @unchecked Sendable {
         let bounds = CGDisplayBounds(displayID)
         guard displayID != 0, CGDisplayIsOnline(displayID) != 0, !bounds.isEmpty,
               let list = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        return visibleWindowsAreWithinBounds(list, pid: pid, bounds: bounds)
+    }
+
+    static func visibleWindowsAreWithinBounds(_ list: [[String: Any]], pid: pid_t, bounds: CGRect) -> Bool {
         let frames = list.compactMap { entry -> CGRect? in
             guard entry[kCGWindowOwnerPID as String] as? pid_t == pid,
                   entry[kCGWindowLayer as String] as? Int == 0,
+                  // Safari keeps hidden helper windows at host coordinates.
+                  // Only visible windows can receive session input. This is
+                  // checked again before every dispatch, so a newly shown host
+                  // window still blocks input immediately.
+                  entry[kCGWindowIsOnscreen as String] as? Bool == true,
                   let dictionary = entry[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: dictionary), frame.width > 1, frame.height > 1 else { return nil }
             return frame
