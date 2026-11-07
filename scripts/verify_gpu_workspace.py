@@ -177,7 +177,8 @@ def main():
 
     try:
         for p in processes():
-            if any(t in p['command'] for t in ('qemu-system-', '/vmhost', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/', '/Dictionary.app/')):
+            if any(t in p['command'] for t in ('qemu-system-', '/vmhost', 'launchd_sim',
+                   'Simulator.app/Contents/MacOS/Simulator', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/', '/Dictionary.app/')):
                 raise RuntimeError('Existing guest/test app; refusing duplicate or borrowed process: ' + p['command'])
         client = MCP(['/opt/homebrew/bin/node', str(Path.home() / 'tinky-vision-mcp/src/isolated-system.mjs')], args.out, 'dogfood')
         result['setup'] = client.tool('setup_status')
