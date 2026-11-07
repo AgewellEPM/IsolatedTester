@@ -92,8 +92,8 @@ def window_inventory(owner):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--apps', nargs='+', choices=['Safari', 'Calculator', 'TextEdit'],
-                        default=['Safari', 'Calculator', 'TextEdit'])
+    parser.add_argument('--apps', nargs='+', choices=['Safari', 'Calculator', 'Dictionary', 'TextEdit'],
+                        default=['Safari', 'Calculator', 'Dictionary'])
     args = parser.parse_args()
     os.umask(0o077)
     args.out.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -117,7 +117,7 @@ def main():
                     raise RuntimeError('GPU utilization counter unavailable')
                 rows = processes()
                 relevant = [p for p in rows if any(t in p['command'] for t in
-                            ('isolated-mcp', 'WindowServer', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/'))]
+                            ('isolated-mcp', 'WindowServer', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/', '/Dictionary.app/'))]
                 windows = subprocess.run([str(Path.home() / 'tinky-vision-mcp/bin/tinky-os'),
                     'find-window', '--query', phase.split('-')[0]], capture_output=True, text=True, timeout=3)
                 result['samples'].append(dict(at=time.monotonic(), phase=phase, gpu=int(device[1]),
@@ -177,7 +177,7 @@ def main():
 
     try:
         for p in processes():
-            if any(t in p['command'] for t in ('qemu-system-', '/vmhost', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/')):
+            if any(t in p['command'] for t in ('qemu-system-', '/vmhost', '/Safari.app/', '/Calculator.app/', '/TextEdit.app/', '/Dictionary.app/')):
                 raise RuntimeError('Existing guest/test app; refusing duplicate or borrowed process: ' + p['command'])
         client = MCP(['/opt/homebrew/bin/node', str(Path.home() / 'tinky-vision-mcp/src/isolated-system.mjs')], args.out, 'dogfood')
         result['setup'] = client.tool('setup_status')
@@ -223,7 +223,7 @@ def main():
         fixture_url = 'http://127.0.0.1:' + str(server.server_port) + '/'
         result['fixture_url'] = fixture_url
         app_paths = [('Safari', '/Applications/Safari.app'), ('Calculator', '/System/Applications/Calculator.app'),
-                     ('TextEdit', '/System/Applications/TextEdit.app')]
+                     ('TextEdit', '/System/Applications/TextEdit.app'), ('Dictionary', '/System/Applications/Dictionary.app')]
         for name, path in app_paths:
             if name not in args.apps:
                 continue
@@ -259,14 +259,28 @@ def main():
                 scoped('os_click', x=digit['image_px']['cx'], y=digit['image_px']['cy'])
                 scoped('os_type', text='+' + str(15 - int(digit['text'])) + '=')
                 app_result['mouse'] = observe('15')
-            else:
+            elif name == 'TextEdit':
                 scoped('os_key', key='escape')
                 scoped('os_key', cmd=True, key='n')
                 scoped('os_type', text='Isolated TextEdit keyboard check 20261107')
                 app_result['keyboard'] = observe('Isolated TextEdit keyboard check')
+            else:
+                scoped('os_key', cmd=True, key='l')
+                scoped('os_type', text='computer')
+                scoped('os_key', key='return')
+                app_result['keyboard'] = observe('computer')
             phase = name + '-idle'
             rest(15)
+            if name == 'Safari':
+                client.tool('stop_recording', sessionId=session['sessionId'])
+                phase = name + '-recording-paused'
+                rest(12)
+                client.tool('start_recording', sessionId=session['sessionId'])
+                phase = name + '-recording-resumed'
+                rest(12)
             app_result['history'] = client.tool('frame_history', sessionId=session['sessionId'], limit=300)
+            if app_result['history']['capacity'] != 300 or not app_result['history']['active'] or app_result['history'].get('error'):
+                raise RuntimeError('Session recording did not retain the 300-frame active ring')
             sid = session['sessionId']
             close_app()
             app_result['owned_app_exited'] = True
