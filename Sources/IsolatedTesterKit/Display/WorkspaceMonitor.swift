@@ -9,7 +9,7 @@ public enum WorkspaceMonitor {
         .appendingPathComponent(".isolated-tester/workspace", isDirectory: true)
     public static let stateURL = directory.appendingPathComponent("monitor.json")
 
-    public struct State: Codable, Sendable {
+    public struct State: Codable, Equatable, Sendable {
         public let ownerPID: Int32
         public let displayID: UInt32
         public let width: Int
@@ -46,10 +46,20 @@ public enum WorkspaceMonitor {
     }
 
     public static func save(_ state: State) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+        try save(state, to: stateURL)
+    }
+
+    static func save(_ state: State, to url: URL) throws {
+        // This is a state record, not a heartbeat. Rewriting it every health
+        // tick creates needless filesystem work and can fail on a full disk.
+        if let data = try? Data(contentsOf: url),
+           let existing = try? JSONDecoder().decode(State.self, from: data), existing == state {
+            return
+        }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
-        try JSONEncoder().encode(state).write(to: stateURL, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+        try JSONEncoder().encode(state).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
 

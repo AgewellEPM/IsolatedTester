@@ -16,6 +16,7 @@ public final class WorkspaceHost {
     private var timer: Timer?
     private var lastHostPoint = CGPoint.zero
     private var hostBounds: [CGRect] = []
+    private var statePublisher = WorkspaceStatePublisher()
 
     public init() {}
 
@@ -74,7 +75,7 @@ public final class WorkspaceHost {
             displayID = display.displayID
             try manager.placeWorkspaceOnLeft(displayID: displayID)
             refreshHostBounds()
-            try publish()
+            publish()
         } catch {
             stop()
             throw error
@@ -88,7 +89,7 @@ public final class WorkspaceHost {
                     }
                     try self.manager.placeWorkspaceOnLeft(displayID: self.displayID)
                     self.refreshHostBounds()
-                    try self.publish()
+                    self.publish()
                 } catch {
                     FileHandle.standardError.write(Data("Workspace health failed: \(error)\n".utf8))
                     self.stop()
@@ -98,9 +99,13 @@ public final class WorkspaceHost {
         }
     }
 
-    private func publish() throws {
-        try WorkspaceMonitor.save(.init(displayID: displayID,
-                                       pointerGuard: tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false))
+    private func publish() {
+        let state = WorkspaceMonitor.State(displayID: displayID,
+                                           pointerGuard: tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
+        if let error = statePublisher.publish(state) {
+            FileHandle.standardError.write(Data(
+                "Workspace status save failed; keeping guarded monitor and retrying in 30 seconds: \(error)\n".utf8))
+        }
     }
 
     private func refreshHostBounds() {
@@ -141,5 +146,6 @@ public final class WorkspaceHost {
         tap = nil; tapSource = nil
         if lease != nil { try? FileManager.default.removeItem(at: WorkspaceMonitor.stateURL) }
         lease = nil
+        statePublisher = WorkspaceStatePublisher()
     }
 }
