@@ -288,7 +288,11 @@ public final class TestSession: @unchecked Sendable {
         // never depend on a visible display. Fall back to display capture only
         // if a display was actually established and there's no app pid.
         if let pid = app?.pid {
-            return try await capture.captureWindow(pid: pid, format: format)
+            // On the persistent 1x monitor ScreenCaptureKit can letterbox the
+            // window inside the requested buffer. Native window-only capture
+            // preserves the image-pixel/window-point coordinates used by input.
+            return try await capture.captureWindow(pid: pid, format: format,
+                                                    preferNativeWindowCapture: requiresWorkspace)
         }
         guard let displayID = display?.displayID else {
             throw SessionError.noActiveSession

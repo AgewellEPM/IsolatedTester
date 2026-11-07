@@ -85,9 +85,10 @@ public final class ScreenCapture: @unchecked Sendable {
     public func captureWindow(
         pid: pid_t,
         format: ImageFormat = .png,
-        jpegQuality: CGFloat = 0.85
+        jpegQuality: CGFloat = 0.85,
+        preferNativeWindowCapture: Bool = false
     ) async throws -> CaptureResult {
-        if !useNativeWindowCapture {
+        if !preferNativeWindowCapture && !useNativeWindowCapture {
             do {
                 return try await captureWindowWithScreenCaptureKit(pid: pid, format: format, jpegQuality: jpegQuality)
             } catch is CaptureDeadlineError {
