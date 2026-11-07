@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import IsolatedServerCore
 import IsolatedTesterKit
@@ -5,6 +6,14 @@ import IsolatedTesterKit
 @main
 struct IsolatedMCPServer {
     static func main() async {
+        if CommandLine.arguments.contains("--workspace-host") {
+            await runWorkspaceHost()
+            return
+        }
+        if CommandLine.arguments.contains("--workspace-viewer") || Bundle.main.bundleIdentifier == "com.isolatedtester.workspace-viewer" {
+            await WorkspaceViewer.run()
+            return
+        }
         // Inventory and protocol startup require no UI permissions. Consent is
         // requested explicitly through request_permissions, never before stdin
         // is serviced (a macOS consent dialog can wait indefinitely).
@@ -37,5 +46,25 @@ struct IsolatedMCPServer {
         let transport = MCPTransport(sessionManager: manager)
         await transport.run()
         await manager.stopAll()
+    }
+
+    @MainActor
+    private static func runWorkspaceHost() async {
+        let host = WorkspaceHost()
+        do {
+            try host.start()
+            signal(SIGTERM, SIG_IGN)
+            signal(SIGINT, SIG_IGN)
+            let sources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
+                let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+                source.setEventHandler { host.stop(); exit(0) }
+                source.resume()
+                return source
+            }
+            withExtendedLifetime(sources) { NSApplication.shared.run() }
+        } catch {
+            FileHandle.standardError.write(Data("AI workspace: \(error.localizedDescription)\n".utf8))
+            exit(1)
+        }
     }
 }

@@ -307,6 +307,39 @@ public final class VirtualDisplayManager: @unchecked Sendable {
         return true
     }
 
+    // MARK: - Persistent workspace
+
+    /// The persistent workspace is left of the whole existing arrangement.
+    /// Its owner installs a pointer barrier before creating it, so there is no
+    /// need to put it on a diagonal to protect the user's physical pointer.
+    @MainActor
+    public func placeWorkspaceOnLeft(displayID: CGDirectDisplayID) throws {
+        let others = onlineDisplays().filter { $0 != displayID }
+        let bounds = CGDisplayBounds(displayID)
+        let union = others.reduce(CGRect.null) { $0.union(CGDisplayBounds($1)) }
+        guard !union.isEmpty, !bounds.isEmpty else {
+            throw DisplayError.creationFailed("No active desktop for the AI workspace")
+        }
+        let target = Self.workspaceOrigin(existing: others.map { CGDisplayBounds($0) }, width: bounds.width)
+        let actual = CGDisplayBounds(displayID).origin
+        if abs(actual.x - target.x) > 1 || abs(actual.y - target.y) > 1 {
+            guard applyOrigin(displayID: displayID, target: target) else {
+                throw DisplayError.creationFailed("Could not arrange the workspace left of the desktop")
+            }
+        }
+        let placed = CGDisplayBounds(displayID)
+        guard abs(placed.minX - target.x) <= 1, abs(placed.minY - target.y) <= 1,
+              !others.contains(where: { CGDisplayBounds($0).intersects(placed) }) else {
+            throw DisplayError.creationFailed("Workspace left-side placement did not stick")
+        }
+        try enforcePostCreateMirrorInvariant(virtualDisplayID: displayID)
+    }
+
+    static func workspaceOrigin(existing: [CGRect], width: CGFloat) -> CGPoint {
+        let union = existing.reduce(CGRect.null) { $0.union($1) }
+        return CGPoint(x: union.minX - width, y: union.minY)
+    }
+
     // MARK: - Post-create mirror invariant
 
     /// Our private virtual displays are stamped vendor 505 / product 0 in the

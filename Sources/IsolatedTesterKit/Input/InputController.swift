@@ -9,13 +9,15 @@ public final class InputController: @unchecked Sendable {
     public let displayID: CGDirectDisplayID
     public let targetPID: pid_t?
     private let windowRelative: Bool
+    private let requireWorkspace: Bool
     private let eventSource: CGEventSource?
 
-    public init(displayID: CGDirectDisplayID, targetPID: pid_t? = nil, windowRelative: Bool = false) {
+    public init(displayID: CGDirectDisplayID, targetPID: pid_t? = nil, windowRelative: Bool = false, requireWorkspace: Bool = false) {
         self.displayID = displayID
         self.targetPID = targetPID
         self.windowRelative = windowRelative
-        self.eventSource = CGEventSource(stateID: .combinedSessionState)
+        self.requireWorkspace = requireWorkspace
+        self.eventSource = CGEventSource(stateID: .privateState)
     }
 
     // MARK: - Mouse Actions
@@ -41,6 +43,7 @@ public final class InputController: @unchecked Sendable {
     @discardableResult
     public func click(at point: CGPoint, button: CGMouseButton = .left, clickCount: Int = 1,
                       preferAccessibility: Bool = true) throws -> String {
+        try validateWorkspace()
         let absolutePoint = try toAbsolute(point)
         if preferAccessibility, button == .left, clickCount == 1, let pid = targetPID,
            AXIntrospector().performAction(pid: pid, x: Float(absolutePoint.x),
@@ -283,9 +286,19 @@ public final class InputController: @unchecked Sendable {
         return best
     }
 
+    private func validateWorkspace() throws {
+        guard requireWorkspace else { return }
+        let workspace = try WorkspaceMonitor.current()
+        guard workspace.displayID == displayID, let pid = targetPID,
+              AppLauncher.windowsAreOnDisplay(pid: pid, displayID: displayID) else {
+            throw AppLaunchError.windowMoveFailed("Input refused: target is outside the AI workspace. Never move it to the user's screen.")
+        }
+    }
+
     // MARK: - Event Posting
 
     private func postEvent(_ event: CGEvent) throws {
+        try validateWorkspace()
         // Isolation invariant: input is ONLY delivered to the session-owned
         // process. There is deliberately no global-tap path — posting to
         // .cghidEventTap drives the user's real cursor and keyboard focus,

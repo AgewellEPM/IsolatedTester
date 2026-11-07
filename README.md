@@ -266,8 +266,26 @@ See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
 
 Permission preflight (`setup_status`) does not prove that capture works. Verify a
 fresh installed `isolated-mcp` process with `session_frame` and observable input
-results. Native sessions use a virtual display or an off-screen window in the
-same macOS login; this is visual isolation, not a VM or a security sandbox.
+results. Native sessions borrow the persistent AI Workspace virtual display in
+the same macOS login; this is visual isolation, not a VM or a security sandbox.
+If the workspace or verified window placement is unavailable, input is refused.
+
+Build with `swift build -c release --disable-automatic-resolution`, then run
+`python3 scripts/install_workspace.py` to install signed binaries, the login
+LaunchAgent and a view-only **AI Workspace** desktop icon. The monitor stays left
+of the existing display arrangement even after tests and MCP connections end.
+Enable `isolated-mcp` under **System Settings → Privacy & Security → Accessibility**
+for the background owner's pointer guard. Until granted, the owner refuses to
+create a monitor your physical pointer could enter. Screen Recording is also
+required for capture. Opening the desktop icon displays the workspace at up to
+1 FPS; closing that viewer leaves the monitor running.
+
+The combined MCP requires `sessionId` for `os_click`, `os_type` and `os_key`.
+They cannot fall back to host input. Sessions refuse to borrow an already-running
+host application, and a process-wide workspace lease permits only one test.
+These guards apply to fresh connections; existing connections retain loaded code
+until reconnected. The explicit CLI development flag `--on-main-display` remains
+an opt-in host operation, outside the isolated MCP path.
 
 ScreenCaptureKit callbacks have cancellation-aware deadlines. If window content
 discovery or image capture stalls, the session switches to bounded native
@@ -308,6 +326,15 @@ app/display cleanup. It denies IP networking to its two MCP servers and inherite
 helpers while allowing local macOS IPC. It does not disable the host's network or
 sandbox apps launched by LaunchServices. Raw evidence stays in the chosen private
 output directory. `--diagnose-with-network` is diagnostic and is not offline proof.
+
+The persistent monitor must already be running. Test cleanup closes only the
+owned app and retains the display arrangement. To also verify sessionless-input
+refusal, cross-connection session exclusion and monitor persistence after every
+diagnostic MCP disconnects, run:
+
+```sh
+python3 scripts/verify_workspace.py --out /private/tmp/isolated-workspace-check
+```
 
 Existing editor MCP connections keep the old binary loaded until reconnected.
 `setup_status` exposes the server PID and executable path to identify the process.

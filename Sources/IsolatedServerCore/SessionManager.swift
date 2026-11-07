@@ -499,7 +499,9 @@ public actor SessionManager {
         // Self-heal placement: apps that opened their first window after
         // launch-time placement gave up get landed on the isolated display
         // before we act, instead of typing into a mis-placed window.
-        _ = await session.ensurePlaced()
+        guard await session.ensurePlaced() else {
+            throw ServerError.invalidRequest("App could not be placed on the AI workspace; input refused. Do not bring it to the front.")
+        }
 
         switch action.action {
         case "click":
@@ -679,7 +681,8 @@ public actor SessionManager {
                 displayID: id,
                 width: Int(bounds.width),
                 height: Int(bounds.height),
-                isMain: id == CoreGraphics.CGMainDisplayID()
+                isMain: id == CoreGraphics.CGMainDisplayID(),
+                x: Int(bounds.minX), y: Int(bounds.minY)
             )
         }
     }

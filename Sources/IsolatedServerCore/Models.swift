@@ -299,12 +299,16 @@ public struct DisplayInfoResponse: Codable, Sendable {
     public let width: Int
     public let height: Int
     public let isMain: Bool
+    public let x: Int
+    public let y: Int
 
-    public init(displayID: UInt32, width: Int, height: Int, isMain: Bool) {
+    public init(displayID: UInt32, width: Int, height: Int, isMain: Bool, x: Int = 0, y: Int = 0) {
         self.displayID = displayID
         self.width = width
         self.height = height
         self.isMain = isMain
+        self.x = x
+        self.y = y
     }
 }
 

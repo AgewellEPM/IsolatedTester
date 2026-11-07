@@ -43,13 +43,18 @@ public final class AppLauncher: @unchecked Sendable {
         arguments: [String] = [],
         environment: [String: String] = [:]
     ) async throws -> LaunchedApp {
+        let existingPIDs = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+        if let bundleID = Bundle(url: appURL)?.bundleIdentifier,
+           !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
+            throw AppLaunchError.launchFailed("App is already running on the host. Use a separate test copy; refusing to move or own the user's app.")
+        }
         // Record the user's frontmost app so we can PROVE we never stole focus.
         let frontmostBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false            // never bring to the foreground / switch Space
         config.addsToRecentItems = false
-        config.createsNewApplicationInstance = false
+        config.createsNewApplicationInstance = true
         if !arguments.isEmpty { config.arguments = arguments }
         if !environment.isEmpty { config.environment = environment }
 
@@ -67,6 +72,9 @@ public final class AppLauncher: @unchecked Sendable {
         let pid = runningApp.processIdentifier
         guard pid > 0 else {
             throw AppLaunchError.launchFailed("Launched app has no valid PID")
+        }
+        guard !existingPIDs.contains(pid) else {
+            throw AppLaunchError.launchFailed("LaunchServices returned an existing app; refusing to move or own it")
         }
         ISTLogger.launcher.info("App launched headless, PID: \(pid)")
 
@@ -245,17 +253,31 @@ public final class AppLauncher: @unchecked Sendable {
     ) async -> Bool {
         ISTLogger.launcher.debug("Moving app \(pid) to display \(displayID)")
         for _ in 0..<maxWaitTicks {
+            if Self.windowsAreOnDisplay(pid: pid, displayID: displayID) { return true }
             if let windows = getWindows(for: pid), !windows.isEmpty {
                 let displayBounds = CGDisplayBounds(displayID)
-
-                return windows.reduce(false) { moved, window in
-                    moveWindow(window, to: displayBounds.origin) || moved
-                }
+                guard !displayBounds.isEmpty else { return false }
+                _ = moveWindow(windows[0], to: CGPoint(x: displayBounds.minX + 16, y: displayBounds.minY + 32),
+                               fitting: CGSize(width: displayBounds.width - 32, height: displayBounds.height - 48))
             }
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
         }
         // App launched but no windows found.
-        return false
+        return Self.windowsAreOnDisplay(pid: pid, displayID: displayID)
+    }
+
+    public static func windowsAreOnDisplay(pid: pid_t, displayID: CGDirectDisplayID) -> Bool {
+        let bounds = CGDisplayBounds(displayID)
+        guard displayID != 0, CGDisplayIsOnline(displayID) != 0, !bounds.isEmpty,
+              let list = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let frames = list.compactMap { entry -> CGRect? in
+            guard entry[kCGWindowOwnerPID as String] as? pid_t == pid,
+                  entry[kCGWindowLayer as String] as? Int == 0,
+                  let dictionary = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dictionary), frame.width > 1, frame.height > 1 else { return nil }
+            return frame
+        }
+        return !frames.isEmpty && frames.allSatisfy { bounds.insetBy(dx: -1, dy: -1).contains($0) }
     }
 
     private func getWindows(for pid: pid_t) -> [[String: Any]]? {
@@ -271,7 +293,7 @@ public final class AppLauncher: @unchecked Sendable {
         return filtered.isEmpty ? nil : filtered
     }
 
-    private func moveWindow(_ window: [String: Any], to origin: CGPoint) -> Bool {
+    private func moveWindow(_ window: [String: Any], to origin: CGPoint, fitting size: CGSize? = nil) -> Bool {
         guard let pid = window[kCGWindowOwnerPID as String] as? pid_t else { return false }
 
         // Use Accessibility API to move the window
@@ -286,6 +308,19 @@ public final class AppLauncher: @unchecked Sendable {
 
         var moved = false
         for axWindow in windows {
+            if let size {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &value) == .success,
+                   let value, CFGetTypeID(value) == AXValueGetTypeID() {
+                    var current = CGSize.zero
+                    if AXValueGetValue(value as! AXValue, .cgSize, &current) {
+                        var fitted = CGSize(width: min(current.width, size.width), height: min(current.height, size.height))
+                        if let fittedValue = AXValueCreate(.cgSize, &fitted) {
+                            AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, fittedValue)
+                        }
+                    }
+                }
+            }
             var position = origin
             if let posValue = AXValueCreate(.cgPoint, &position) {
                 if AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue) == .success {

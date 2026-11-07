@@ -121,15 +121,17 @@ def main():
                                 objective='Offline integration: typed 27+15=42, screenshot-clicked 7 then +8=15, local OCR, recording pause/resume, finalized video.')
         result['session'] = session
         sid = session['sessionId']
-        # Luke's intended setup is a second local virtual monitor. A working
-        # off-screen window fallback does not satisfy that specific criterion.
+        # Sessions borrow the persistent monitor; creating/removing a display
+        # per test would violate its lifetime contract.
         active_displays = isolated.tool('list_displays')
         result['displays_during'] = active_displays
         display = next((d for d in active_displays if d['displayID'] == session['displayID']), None)
+        workspace = result['setup'].get('workspace', {})
         if (not display or display['isMain'] or session['displayID'] == 0
-                or display['width'] != 1024 or display['height'] != 768
-                or any(d['displayID'] == session['displayID'] for d in result['displays_before'])):
-            raise RuntimeError('A new local 1024x768 virtual monitor was not created')
+                or not workspace.get('pointerGuard')
+                or session['displayID'] != workspace.get('displayID')
+                or active_displays != result['displays_before']):
+            raise RuntimeError('Session did not borrow the guarded persistent monitor')
         result['virtual_monitor_verified'] = True
         if not session['windowsPlaced']: raise RuntimeError('App was not isolated')
         isolated.tool('os_key' if args.unified_server else 'key_press', sessionId=sid, key='escape')
@@ -223,9 +225,9 @@ def main():
             inventory = MCP([args.binary], args.out, 'cleanup-inventory', not args.diagnose_with_network)
             try: result['fresh_displays_after'] = inventory.tool('list_displays')
             finally: inventory.close()
-            before = {d['displayID'] for d in result.get('displays_before', [])}
-            after = {d['displayID'] for d in result['fresh_displays_after']}
-            if after - before: raise RuntimeError('A test display remains in fresh process inventory')
+            before = result.get('displays_before')
+            if before is not None and result['fresh_displays_after'] != before:
+                raise RuntimeError('Display arrangement changed after stopping/disconnecting the test')
         except Exception as error:
             result.update(status='FAIL', cleanup_error=str(error))
         if session:

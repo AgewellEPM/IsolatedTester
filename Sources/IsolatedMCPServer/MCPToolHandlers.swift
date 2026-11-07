@@ -385,7 +385,7 @@ final class MCPToolHandlers {
                 let perms = await sessionManager.checkPermissions()
                 let activeSessions = await sessionManager.activeSessionCount
                 let virtualDisplayAvailable = NSClassFromString("CGVirtualDisplayDescriptor") != nil
-                let status: [String: Any] = [
+                var status: [String: Any] = [
                     "version": IsolatedTesterVersion.current,
                     "processID": ProcessInfo.processInfo.processIdentifier,
                     "executablePath": CommandLine.arguments.first ?? "",
@@ -403,6 +403,14 @@ final class MCPToolHandlers {
                     "toolCount": listTools().count,
                     "status": perms.allGranted ? "ready" : "permissions_required"
                 ]
+                if let workspace = try? WorkspaceMonitor.current(),
+                   let data = try? JSONEncoder().encode(workspace),
+                   let object = try? JSONSerialization.jsonObject(with: data) {
+                    status["workspace"] = object
+                } else {
+                    status["workspace"] = ["ready": false, "note": "Persistent AI monitor unavailable; host input is refused."]
+                    status["status"] = "workspace_required"
+                }
                 if let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]),
                    let json = String(data: data, encoding: .utf8) {
                     result = json

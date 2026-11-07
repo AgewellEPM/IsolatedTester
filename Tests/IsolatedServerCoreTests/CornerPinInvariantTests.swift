@@ -39,10 +39,10 @@ final class CornerPinInvariantTests: XCTestCase {
     private func cornerPinBody() throws -> String {
         let src = try source(managerPath)
         guard let start = src.range(of: "private func cornerPin"),
-              let end = src.range(of: "// MARK: - Post-create mirror invariant"),
+              let end = src.range(of: "// MARK:", range: start.upperBound..<src.endIndex),
               start.lowerBound < end.lowerBound else {
             XCTFail("VirtualDisplayManager.swift: cornerPin machinery not found before the "
-                + "post-create-mirror MARK — the pin may have been moved or deleted")
+                + "next MARK — the pin may have been moved or deleted")
             return ""
         }
         return String(src[start.lowerBound..<end.lowerBound])

@@ -14,6 +14,8 @@ public final class TestSession: @unchecked Sendable {
     private var display: VirtualDisplayManager.ManagedDisplay?
     private var app: AppLauncher.LaunchedApp?
     private var input: InputController?
+    private var workspaceLease: WorkspaceLease?
+    private var requiresWorkspace = false
     private var actionLog: [ActionRecord] = []
     private let lock = NSLock()
 
@@ -49,39 +51,33 @@ public final class TestSession: @unchecked Sendable {
 
     // MARK: - Session Lifecycle
 
-    /// Start a test session with an isolated virtual display. If display
-    /// creation fails, the session runs fully headless — there is NO path from
-    /// here to the user's real display.
+    /// Borrow the persistent AI monitor. A missing monitor is an error; a
+    /// session must never degrade into host-desktop or off-screen input.
     public func start(
         appURL: URL,
         displayConfig: VirtualDisplayManager.DisplayConfig = .init()
     ) async throws -> SessionState {
-        // HEADLESS MODEL (the console's isolation, for native apps): the app is
-        // launched non-activating + moved off every physical display, and we
-        // read its pixels by WINDOW capture — so it never touches the user's
-        // desktop. A virtual display is best-effort (some apps render nicer with
-        // one) but NOT required. The former fallbackToMainDisplay option was
-        // removed after it silently hijacked the live desktop (2026-08-18):
-        // isolation degrades to headless, never to the user's screen.
-        var displayID: CGDirectDisplayID = 0
+        let lease = try WorkspaceLease(name: "test-session")
+        let workspace = try WorkspaceMonitor.current()
+        workspaceLease = lease
+        requiresWorkspace = true
+        self.display = VirtualDisplayManager.ManagedDisplay(
+            displayID: workspace.displayID,
+            config: .init(width: workspace.width, height: workspace.height),
+            createdAt: Date(), isVirtual: true)
         do {
-            let managedDisplay = try await displayManager.createDisplay(config: displayConfig)
-            self.display = managedDisplay
-            displayID = managedDisplay.displayID
-            ISTLogger.session.info("Created virtual display: \(displayID)")
+            let launchedApp = try await launcher.launchApp(at: appURL, displayID: workspace.displayID)
+            self.app = launchedApp
+            guard await launcher.retryPlacement(pid: launchedApp.pid, displayID: workspace.displayID) else {
+                throw AppLaunchError.windowMoveFailed("App did not land on the AI workspace; input refused")
+            }
+            self.input = InputController(displayID: workspace.displayID, targetPID: launchedApp.pid,
+                                         windowRelative: true, requireWorkspace: true)
+            return state
         } catch {
-            ISTLogger.session.info("No virtual display (\(error.localizedDescription)); running fully headless via window capture")
+            teardownResources()
+            throw error
         }
-
-        let launchedApp = try await launcher.launchApp(at: appURL, displayID: displayID)
-        self.app = launchedApp
-
-        self.input = InputController(displayID: displayID, targetPID: launchedApp.pid, windowRelative: true)
-
-        // Wait for the app's first window to exist (so capture + off-screen move land).
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-
-        return state
     }
 
     /// Start a session on the main display (for development/single-display systems).
@@ -107,13 +103,20 @@ public final class TestSession: @unchecked Sendable {
         return state
     }
 
-    /// Create an isolated display and move an existing QEMU window onto it.
+    /// Borrow the workspace and move an existing QEMU window onto it.
     /// The VM remains owned by Perslis; stopping this session never terminates it.
     public func attachVM(
         pid: pid_t,
         displayConfig: VirtualDisplayManager.DisplayConfig = .init()
     ) async throws -> SessionState {
-        let managedDisplay = try await displayManager.createDisplay(config: displayConfig)
+        let lease = try WorkspaceLease(name: "test-session")
+        let workspace = try WorkspaceMonitor.current()
+        workspaceLease = lease
+        requiresWorkspace = true
+        let managedDisplay = VirtualDisplayManager.ManagedDisplay(
+            displayID: workspace.displayID,
+            config: .init(width: workspace.width, height: workspace.height),
+            createdAt: Date(), isVirtual: true)
         self.display = managedDisplay
         do {
             let attachedApp = try await launcher.attachExistingVM(
@@ -124,13 +127,12 @@ public final class TestSession: @unchecked Sendable {
             self.input = InputController(
                 displayID: managedDisplay.displayID,
                 targetPID: attachedApp.pid,
-                windowRelative: true
+                windowRelative: true, requireWorkspace: true
             )
             try await Task.sleep(nanoseconds: 500_000_000)
             return state
         } catch {
-            displayManager.destroyDisplay(id: managedDisplay.displayID)
-            self.display = nil
+            teardownResources()
             throw error
         }
     }
@@ -162,18 +164,19 @@ public final class TestSession: @unchecked Sendable {
         return sealedVideoPath
     }
 
-    /// Terminate the owned app and destroy the display. Shared by stop() and
+    /// Terminate the owned app and release its workspace lease. Shared by stop() and
     /// deinit; does not touch the (already-canceled) capture loop.
     private func teardownResources() {
         if let app, app.ownsProcess {
             launcher.terminateApp(pid: app.pid)
         }
-        if let displayID = display?.displayID {
+        if !requiresWorkspace, let displayID = display?.displayID {
             displayManager.destroyDisplay(id: displayID)
         }
         app = nil
         display = nil
         input = nil
+        workspaceLease = nil
     }
 
     // MARK: - Reviewable footage: metadata + queryable index
@@ -350,6 +353,7 @@ public final class TestSession: @unchecked Sendable {
     /// and record successful actions alongside keyboard/pointer receipts.
     public func performElementAction(x: Double, y: Double, action: String) throws -> Bool {
         guard let pid = app?.pid else { throw SessionError.noActiveSession }
+        try validateWorkspace()
         let success = AXIntrospector().performAction(pid: pid, x: Float(x), y: Float(y), action: action)
         if success { logAction("accessibility", details: "\(action) at (\(x),\(y))") }
         return success
@@ -367,7 +371,7 @@ public final class TestSession: @unchecked Sendable {
             isRunning: app.map { launcher.isRunning(pid: $0.pid) } ?? false,
             actionCount: actionLog.count,
             startedAt: app?.launchedAt ?? Date(),
-            windowsPlaced: app?.windowsPlaced ?? false
+            windowsPlaced: app.map { AppLauncher.windowsAreOnDisplay(pid: $0.pid, displayID: $0.displayID) } ?? false
         )
     }
 
@@ -551,7 +555,7 @@ public final class TestSession: @unchecked Sendable {
     /// launch (first window appeared late), try the move again before acting.
     public func ensurePlaced() async -> Bool {
         guard let currentApp = app else { return false }
-        if currentApp.windowsPlaced { return true }
+        if AppLauncher.windowsAreOnDisplay(pid: currentApp.pid, displayID: currentApp.displayID) { return true }
         guard let displayID = display?.displayID else { return false }
         let placed = await launcher.retryPlacement(pid: currentApp.pid, displayID: displayID)
         if placed {
@@ -562,6 +566,15 @@ public final class TestSession: @unchecked Sendable {
             ))
         }
         return placed
+    }
+
+    private func validateWorkspace() throws {
+        guard requiresWorkspace else { return }
+        let workspace = try WorkspaceMonitor.current()
+        guard let app, workspace.displayID == app.displayID,
+              AppLauncher.windowsAreOnDisplay(pid: app.pid, displayID: app.displayID) else {
+            throw AppLaunchError.windowMoveFailed("App is outside the AI workspace; input refused. Do not bring it to the front.")
+        }
     }
 
     private func setApp(_ updated: AppLauncher.LaunchedApp) {
